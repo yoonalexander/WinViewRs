@@ -623,6 +623,7 @@ fn inspect_bags(reader: &WindowsRegistryReader, snapshot: &mut InspectionSnapsho
         BAG_MRU,
         ObservationSource::HkcuBags,
         &mut snapshot.bags,
+        "",
     );
     inspect_key_tree(
         reader,
@@ -630,6 +631,7 @@ fn inspect_bags(reader: &WindowsRegistryReader, snapshot: &mut InspectionSnapsho
         BAGS,
         ObservationSource::HkcuBags,
         &mut snapshot.bags,
+        "",
     );
     inspect_key_tree(
         reader,
@@ -637,6 +639,7 @@ fn inspect_bags(reader: &WindowsRegistryReader, snapshot: &mut InspectionSnapsho
         ALL_FOLDERS_SHELL,
         ObservationSource::HkcuBags,
         &mut snapshot.bags,
+        "",
     );
     inspect_key_tree(
         reader,
@@ -644,6 +647,7 @@ fn inspect_bags(reader: &WindowsRegistryReader, snapshot: &mut InspectionSnapsho
         ALL_FOLDERS_COMDLG,
         ObservationSource::HkcuBags,
         &mut snapshot.bags,
+        "",
     );
     inspect_key_tree(
         reader,
@@ -651,6 +655,7 @@ fn inspect_bags(reader: &WindowsRegistryReader, snapshot: &mut InspectionSnapsho
         ALL_FOLDERS_COMDLG_LEGACY,
         ObservationSource::HkcuBags,
         &mut snapshot.bags,
+        "",
     );
 }
 
@@ -663,6 +668,7 @@ fn inspect_streams(reader: &WindowsRegistryReader, snapshot: &mut InspectionSnap
         STREAMS,
         ObservationSource::HkcuStreams,
         &mut snapshot.streams,
+        "",
     );
     inspect_key_tree(
         reader,
@@ -670,6 +676,7 @@ fn inspect_streams(reader: &WindowsRegistryReader, snapshot: &mut InspectionSnap
         STREAMS_DEFAULTS,
         ObservationSource::HkcuStreams,
         &mut snapshot.streams,
+        "",
     );
     inspect_key_tree(
         reader,
@@ -677,6 +684,7 @@ fn inspect_streams(reader: &WindowsRegistryReader, snapshot: &mut InspectionSnap
         DESKTOP,
         ObservationSource::HkcuStreams,
         &mut snapshot.streams,
+        "",
     );
 }
 
@@ -760,6 +768,7 @@ fn inspect_clsid(reader: &WindowsRegistryReader, snapshot: &mut InspectionSnapsh
             path,
             ObservationSource::HkcuClsid,
             &mut snapshot.clsid,
+            "",
         );
     }
 }
@@ -773,6 +782,7 @@ fn inspect_policies(reader: &WindowsRegistryReader, snapshot: &mut InspectionSna
         EXPLORER_POLICIES,
         ObservationSource::HkcuPolicies,
         &mut snapshot.policies,
+        "",
     );
     inspect_key_tree(
         reader,
@@ -780,6 +790,7 @@ fn inspect_policies(reader: &WindowsRegistryReader, snapshot: &mut InspectionSna
         USER_EXPLORER_POLICIES,
         ObservationSource::HkcuPolicies,
         &mut snapshot.policies,
+        "",
     );
     inspect_key_tree(
         reader,
@@ -787,6 +798,7 @@ fn inspect_policies(reader: &WindowsRegistryReader, snapshot: &mut InspectionSna
         EXPLORER_POLICIES,
         ObservationSource::HklmPolicies,
         &mut snapshot.policies,
+        "HKLM",
     );
     inspect_key_tree(
         reader,
@@ -794,6 +806,7 @@ fn inspect_policies(reader: &WindowsRegistryReader, snapshot: &mut InspectionSna
         USER_COMDLG_PLACESBAR,
         ObservationSource::HkcuPolicies,
         &mut snapshot.policies,
+        "",
     );
 }
 
@@ -803,7 +816,14 @@ fn inspect_key_tree(
     path: &str,
     source: ObservationSource,
     target: &mut BTreeMap<String, KeySnapshot>,
+    key_prefix: &str,
 ) {
+    let map_key = if key_prefix.is_empty() {
+        path.to_string()
+    } else {
+        format!("{}\\{}", key_prefix, path)
+    };
+
     let key_result = reader.open_key(root, path);
     let key = match key_result {
         Ok(k) => k,
@@ -815,7 +835,7 @@ fn inspect_key_tree(
                 operation: "open_key".to_string(),
                 error: e.to_string(),
             });
-            target.insert(path.to_string(), snapshot);
+            target.insert(map_key.clone(), snapshot);
             return;
         }
     };
@@ -855,9 +875,16 @@ fn inspect_key_tree(
     if let Ok(subkeys) = subkeys_result {
         for subkey_name in subkeys {
             let subkey_path = format!(r"{}\{}", path, subkey_name);
-            inspect_key_tree(reader, root, &subkey_path, source, &mut snapshot.subkeys);
+            inspect_key_tree(
+                reader,
+                root,
+                &subkey_path,
+                source,
+                &mut snapshot.subkeys,
+                "",
+            );
         }
     }
 
-    target.insert(path.to_string(), snapshot);
+    target.insert(map_key.clone(), snapshot);
 }
