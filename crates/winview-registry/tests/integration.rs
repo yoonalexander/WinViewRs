@@ -128,26 +128,24 @@ mod integration {
 
         // Find any value and verify raw_type_id is populated
         let mut found_any = false;
-        for (_, fs) in &snapshot.hkcu_folder_types.types {
-            for (_, view) in &fs.top_views {
-                for (_, vread) in &view.raw_values {
+        for fs in snapshot.hkcu_folder_types.types.values() {
+            for view in fs.top_views.values() {
+                for vread in view.raw_values.values() {
                     if let ValueReadResult::Success(raw) = vread {
                         found_any = true;
                         // Windows REG_* type IDs: 0=REG_NONE, 1=REG_SZ, 2=REG_EXPAND_SZ, 3=REG_BINARY, 4=REG_DWORD, 7=REG_MULTI_SZ, 11=REG_QWORD
                         // Unknown types have other IDs
                         // All are valid u32
-                        assert!(raw.raw_type_id <= u32::MAX);
                     }
                 }
             }
         }
         // Also check HKLM
-        for (_, fs) in &snapshot.hklm_folder_types.types {
-            for (_, view) in &fs.top_views {
-                for (_, vread) in &view.raw_values {
+        for fs in snapshot.hklm_folder_types.types.values() {
+            for view in fs.top_views.values() {
+                for vread in view.raw_values.values() {
                     if let ValueReadResult::Success(raw) = vread {
                         found_any = true;
-                        assert!(raw.raw_type_id <= u32::MAX);
                     }
                 }
             }
@@ -164,18 +162,10 @@ mod integration {
     fn unknown_registry_types_preserved() {
         let reader = WindowsRegistryReader;
         let snapshot = reader.inspect_all().unwrap();
-
-        // Scan for any RegistryValue::Unknown - if present, verify type_id and data preserved
-        fn check_unknown(_val: &winview_core::model::RegistryValue) -> bool {
-            // RegistryValue doesn't have Unknown variant — unknown types are in RawRegistryValue.decoding_status
-            // This test documents expected behavior
-            false
-        }
-
         let mut found_unknown = false;
-        for (_, fs) in &snapshot.hkcu_folder_types.types {
-            for (_, view) in &fs.top_views {
-                for (_, vread) in &view.raw_values {
+        for fs in snapshot.hkcu_folder_types.types.values() {
+            for view in fs.top_views.values() {
+                for vread in view.raw_values.values() {
                     if let ValueReadResult::Success(raw) = vread {
                         if matches!(
                             raw.decoding_status,
@@ -193,14 +183,6 @@ mod integration {
         let _ = found_unknown;
     }
 
-    #[test]
-    #[ignore = "requires Windows registry access"]
-    fn errors_collected_in_snapshot() {
-        let reader = WindowsRegistryReader;
-        let snapshot = reader.inspect_all().unwrap();
-
-        // Errors vector exists and is serializable
-    }
 
     #[test]
     #[ignore = "requires Windows registry access"]
