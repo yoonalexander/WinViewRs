@@ -624,6 +624,7 @@ fn inspect_bags(reader: &WindowsRegistryReader, snapshot: &mut InspectionSnapsho
         ObservationSource::HkcuBags,
         &mut snapshot.bags,
         "",
+        0,
     );
     inspect_key_tree(
         reader,
@@ -632,6 +633,7 @@ fn inspect_bags(reader: &WindowsRegistryReader, snapshot: &mut InspectionSnapsho
         ObservationSource::HkcuBags,
         &mut snapshot.bags,
         "",
+        0,
     );
     inspect_key_tree(
         reader,
@@ -640,6 +642,7 @@ fn inspect_bags(reader: &WindowsRegistryReader, snapshot: &mut InspectionSnapsho
         ObservationSource::HkcuBags,
         &mut snapshot.bags,
         "",
+        0,
     );
     inspect_key_tree(
         reader,
@@ -648,6 +651,7 @@ fn inspect_bags(reader: &WindowsRegistryReader, snapshot: &mut InspectionSnapsho
         ObservationSource::HkcuBags,
         &mut snapshot.bags,
         "",
+        0,
     );
     inspect_key_tree(
         reader,
@@ -656,6 +660,7 @@ fn inspect_bags(reader: &WindowsRegistryReader, snapshot: &mut InspectionSnapsho
         ObservationSource::HkcuBags,
         &mut snapshot.bags,
         "",
+        0,
     );
 }
 
@@ -669,6 +674,7 @@ fn inspect_streams(reader: &WindowsRegistryReader, snapshot: &mut InspectionSnap
         ObservationSource::HkcuStreams,
         &mut snapshot.streams,
         "",
+        0,
     );
     inspect_key_tree(
         reader,
@@ -677,6 +683,7 @@ fn inspect_streams(reader: &WindowsRegistryReader, snapshot: &mut InspectionSnap
         ObservationSource::HkcuStreams,
         &mut snapshot.streams,
         "",
+        0,
     );
     inspect_key_tree(
         reader,
@@ -685,6 +692,7 @@ fn inspect_streams(reader: &WindowsRegistryReader, snapshot: &mut InspectionSnap
         ObservationSource::HkcuStreams,
         &mut snapshot.streams,
         "",
+        0,
     );
 }
 
@@ -769,6 +777,7 @@ fn inspect_clsid(reader: &WindowsRegistryReader, snapshot: &mut InspectionSnapsh
             ObservationSource::HkcuClsid,
             &mut snapshot.clsid,
             "",
+            0,
         );
     }
 }
@@ -783,6 +792,7 @@ fn inspect_policies(reader: &WindowsRegistryReader, snapshot: &mut InspectionSna
         ObservationSource::HkcuPolicies,
         &mut snapshot.policies,
         "",
+        0,
     );
     inspect_key_tree(
         reader,
@@ -791,6 +801,7 @@ fn inspect_policies(reader: &WindowsRegistryReader, snapshot: &mut InspectionSna
         ObservationSource::HkcuPolicies,
         &mut snapshot.policies,
         "",
+        0,
     );
     inspect_key_tree(
         reader,
@@ -799,6 +810,7 @@ fn inspect_policies(reader: &WindowsRegistryReader, snapshot: &mut InspectionSna
         ObservationSource::HklmPolicies,
         &mut snapshot.policies,
         "HKLM",
+        0,
     );
     inspect_key_tree(
         reader,
@@ -807,6 +819,7 @@ fn inspect_policies(reader: &WindowsRegistryReader, snapshot: &mut InspectionSna
         ObservationSource::HkcuPolicies,
         &mut snapshot.policies,
         "",
+        0,
     );
 }
 
@@ -817,12 +830,27 @@ fn inspect_key_tree(
     source: ObservationSource,
     target: &mut BTreeMap<String, KeySnapshot>,
     key_prefix: &str,
+    depth: usize,
 ) {
+    const MAX_DEPTH: usize = 32;
+
     let map_key = if key_prefix.is_empty() {
         path.to_string()
     } else {
         format!("{}\\{}", key_prefix, path)
     };
+
+    if depth >= MAX_DEPTH {
+        let mut snapshot = KeySnapshot::default();
+        snapshot.read_errors.push(InspectionError {
+            key_path: path.to_string(),
+            root,
+            operation: "traverse".to_string(),
+            error: format!("Maximum recursion depth ({}) exceeded", MAX_DEPTH),
+        });
+        target.insert(map_key, snapshot);
+        return;
+    }
 
     let key_result = reader.open_key(root, path);
     let key = match key_result {
@@ -882,6 +910,7 @@ fn inspect_key_tree(
                 source,
                 &mut snapshot.subkeys,
                 "",
+                depth + 1,
             );
         }
     }
