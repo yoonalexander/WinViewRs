@@ -131,7 +131,7 @@ mod integration {
         for fs in snapshot.hkcu_folder_types.types.values() {
             for view in fs.top_views.values() {
                 for vread in view.raw_values.values() {
-                    if let ValueReadResult::Success(raw) = vread {
+                    if let ValueReadResult::Success(_raw) = vread {
                         found_any = true;
                         // Windows REG_* type IDs: 0=REG_NONE, 1=REG_SZ, 2=REG_EXPAND_SZ, 3=REG_BINARY, 4=REG_DWORD, 7=REG_MULTI_SZ, 11=REG_QWORD
                         // Unknown types have other IDs
@@ -144,7 +144,7 @@ mod integration {
         for fs in snapshot.hklm_folder_types.types.values() {
             for view in fs.top_views.values() {
                 for vread in view.raw_values.values() {
-                    if let ValueReadResult::Success(raw) = vread {
+                    if let ValueReadResult::Success(_raw) = vread {
                         found_any = true;
                     }
                 }
@@ -166,14 +166,14 @@ mod integration {
         for fs in snapshot.hkcu_folder_types.types.values() {
             for view in fs.top_views.values() {
                 for vread in view.raw_values.values() {
-                    if let ValueReadResult::Success(raw) = vread {
+                    if let ValueReadResult::Success(_raw) = vread {
                         if matches!(
-                            raw.decoding_status,
+                            _raw.decoding_status,
                             winview_core::model::DecodingStatus::UnknownType
                         ) {
                             found_unknown = true;
-                            assert!(raw.raw_type_id > 11 || raw.raw_type_id == 0); // Unknown or REG_NONE
-                            assert!(!raw.raw_bytes.is_empty());
+                            assert!(_raw.raw_type_id > 11 || _raw.raw_type_id == 0); // Unknown or REG_NONE
+                            assert!(!_raw.raw_bytes.is_empty());
                         }
                     }
                 }

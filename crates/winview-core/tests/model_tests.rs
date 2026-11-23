@@ -160,7 +160,7 @@ fn fake_registry_reader_basic_operations() {
 
     let result = fake.get_value(RootKey::Hkcu, r"Software\Test", "Value");
     assert!(result.is_ok());
-    let (type_name, value) = result.unwrap();
+    let (type_name, _raw, value, _status) = result.unwrap();
     assert_eq!(type_name, ValueTypeName::RegDword);
     assert_eq!(value, RegistryValue::Dword(123));
 }

@@ -99,7 +99,7 @@ impl RegistryReader for FakeRegistryReader {
         root: RootKey,
         path: &str,
         name: &str,
-    ) -> RegistryResult<(ValueTypeName, RegistryValue)> {
+    ) -> RegistryResult<(ValueTypeName, Vec<u8>, RegistryValue, DecodingStatus)> {
         let key = self.open_key(root, path)?;
         key.get_value(name)
     }
@@ -138,8 +138,8 @@ impl RegistryKey for FakeRegistryKeyHandle {
         Ok(self.inner.subkeys.keys().cloned().collect())
     }
 
-    fn get_value(&self, name: &str) -> RegistryResult<(ValueTypeName, RegistryValue)> {
-        let (type_id, _, decoded, _) =
+    fn get_value(&self, name: &str) -> RegistryResult<(ValueTypeName, Vec<u8>, RegistryValue, DecodingStatus)> {
+        let (type_id, raw_bytes, decoded, status) =
             self.inner
                 .values
                 .get(name)
@@ -151,7 +151,7 @@ impl RegistryKey for FakeRegistryKeyHandle {
         let decoded = decoded.clone().ok_or(RegistryError::InvalidData(
             "no decoded value in fake".into(),
         ))?;
-        Ok((type_id_to_name(*type_id), decoded))
+        Ok((type_id_to_name(*type_id), raw_bytes.clone(), decoded, status.clone()))
     }
 
     fn get_value_type(&self, name: &str) -> RegistryResult<ValueTypeName> {

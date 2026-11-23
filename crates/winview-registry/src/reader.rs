@@ -6,8 +6,8 @@ use std::ops::Deref;
 use windows_registry::{Key, Type as RegType, CURRENT_USER, LOCAL_MACHINE};
 use winview_core::model::{
     DecodingStatus, FolderTypeSnapshot, FolderTypesSnapshot, InspectionError, InspectionSnapshot,
-    KeySnapshot, ObservationSource, RawRegistryValue, ReadError, RegistryValue, ValueReadResult,
-    ViewSnapshot,
+    InspectionStatus, KeySnapshot, ObservationSource, RawRegistryValue, ReadError, RegistryValue,
+    ValueReadResult, ViewSnapshot,
 };
 use winview_core::registry::keys::{RootKey, ValueTypeName};
 use winview_core::registry::traits::{RegistryError, RegistryKey, RegistryReader, RegistryResult};
@@ -37,7 +37,7 @@ impl RegistryReader for WindowsRegistryReader {
         root: RootKey,
         path: &str,
         name: &str,
-    ) -> RegistryResult<(ValueTypeName, RegistryValue)> {
+    ) -> RegistryResult<(ValueTypeName, Vec<u8>, RegistryValue, DecodingStatus)> {
         let key = self.open_key(root, path)?;
         key.get_value(name)
     }
@@ -75,6 +75,31 @@ impl RegistryReader for WindowsRegistryReader {
         inspect_clsid(self, &mut snapshot);
         inspect_policies(self, &mut snapshot);
 
+        // Determine inspection status based on collected errors
+        let total_errors = snapshot.errors.len()
+            + snapshot.hkcu_folder_types.read_errors.len()
+            + snapshot.hklm_folder_types.read_errors.len()
+            + snapshot.advanced.read_errors.len();
+        let has_data = !snapshot.hkcu_folder_types.types.is_empty()
+            || !snapshot.hklm_folder_types.types.is_empty()
+            || !snapshot.bags.is_empty()
+            || !snapshot.streams.is_empty()
+            || !snapshot.advanced.values.is_empty()
+            || !snapshot.clsid.is_empty()
+            || !snapshot.policies.is_empty();
+
+        if total_errors == 0 {
+            snapshot.status = InspectionStatus::Complete;
+        } else if has_data {
+            snapshot.status = InspectionStatus::Partial {
+                reason: format!("{} read errors encountered", total_errors),
+            };
+        } else {
+            snapshot.status = InspectionStatus::Failed {
+                error: format!("Inspection failed with {} errors", total_errors),
+            };
+        }
+
         Ok(snapshot)
     }
 }
@@ -109,16 +134,15 @@ impl RegistryKey for WindowsRegistryKey {
         Ok(results)
     }
 
-    fn get_value(&self, name: &str) -> RegistryResult<(ValueTypeName, RegistryValue)> {
-        // Use get_value to preserve unknown types and raw bytes
+    fn get_value(&self, name: &str) -> RegistryResult<(ValueTypeName, Vec<u8>, RegistryValue, DecodingStatus)> {
         let value = self
             .0
             .get_value(name)
             .map_err(|e| RegistryError::WindowsApi(e.to_string()))?;
 
-        let (type_name, reg_value, _raw_bytes, _status) =
+        let (type_name, reg_value, raw_bytes, status) =
             convert_registry_value(value.ty(), value.deref());
-        Ok((type_name, reg_value))
+        Ok((type_name, raw_bytes, reg_value, status))
     }
 
     fn get_value_type(&self, name: &str) -> RegistryResult<ValueTypeName> {
@@ -414,7 +438,7 @@ fn inspect_folder_types_hive(
         let canonical_name = guid_key
             .get_value(CANONICAL_NAME)
             .ok()
-            .and_then(|(_, v)| match v {
+            .and_then(|(_, _, v, _)| match v {
                 RegistryValue::String(s) => Some(s),
                 _ => None,
             });
@@ -455,27 +479,19 @@ fn inspect_folder_types_hive(
         for (const_name, field_name) in view_value_names {
             let value_result = top_views_key.get_value(const_name);
             let read_result = match value_result {
-                Ok((type_name, decoded)) => {
-                    // We need raw bytes — for now use the typed value
-                    // The full raw bytes are captured in inspect_all via the key's get_value
-                    // which has access to the full Value (including Deref)
-                    // For simplicity, we'll use the decoded value here
-                    let raw_bytes = match &decoded {
-                        RegistryValue::String(s) => s.as_bytes().to_vec(),
-                        RegistryValue::ExpandString(s) => s.as_bytes().to_vec(),
-                        RegistryValue::Dword(v) => v.to_le_bytes().to_vec(),
-                        RegistryValue::Qword(v) => v.to_le_bytes().to_vec(),
-                        RegistryValue::Binary(b) => b.clone(),
-                        RegistryValue::MultiString(parts) => parts.join("\0").as_bytes().to_vec(),
+                Ok((tn, raw_bytes, decoded, status)) => {
+                    let decoded_opt = match status {
+                        DecodingStatus::Decoded => Some(decoded),
+                        _ => None,
                     };
                     ValueReadResult::Success(RawRegistryValue {
                         key_path: top_views_path.clone(),
                         value_name: field_name.to_string(),
                         root,
-                        raw_type_id: type_name.to_raw_id(), // This is a simplification; real impl would use actual type ID
+                        raw_type_id: tn.to_raw_id(),
                         raw_bytes,
-                        decoded: Some(decoded),
-                        decoding_status: DecodingStatus::Decoded,
+                        decoded: decoded_opt,
+                        decoding_status: status,
                         source,
                     })
                 }
@@ -668,23 +684,19 @@ fn inspect_advanced(reader: &WindowsRegistryReader, snapshot: &mut InspectionSna
     for value_name in advanced_values {
         let value_result = key.get_value(value_name);
         let read_result = match value_result {
-            Ok((type_name, decoded)) => {
-                let raw_bytes = match &decoded {
-                    RegistryValue::String(s) => s.as_bytes().to_vec(),
-                    RegistryValue::ExpandString(s) => s.as_bytes().to_vec(),
-                    RegistryValue::Dword(v) => v.to_le_bytes().to_vec(),
-                    RegistryValue::Qword(v) => v.to_le_bytes().to_vec(),
-                    RegistryValue::Binary(b) => b.clone(),
-                    RegistryValue::MultiString(parts) => parts.join("\0").as_bytes().to_vec(),
+            Ok((tn, raw_bytes, decoded, status)) => {
+                let decoded_opt = match status {
+                    DecodingStatus::Decoded => Some(decoded),
+                    _ => None,
                 };
                 ValueReadResult::Success(RawRegistryValue {
                     key_path: ADVANCED.to_string(),
                     value_name: value_name.to_string(),
                     root: RootKey::Hkcu,
-                    raw_type_id: type_name.to_raw_id(),
+                    raw_type_id: tn.to_raw_id(),
                     raw_bytes,
-                    decoded: Some(decoded),
-                    decoding_status: DecodingStatus::Decoded,
+                    decoded: decoded_opt,
+                    decoding_status: status,
                     source: ObservationSource::HkcuAdvanced,
                 })
             }
@@ -786,26 +798,22 @@ fn inspect_key_tree(
     // Read values
     let values_result = key.enum_values();
     if let Ok(values) = values_result {
-        for (value_name, type_name) in values {
+        for (value_name, _type_name) in values {
             let value_result = key.get_value(&value_name);
             let read_result = match value_result {
-                Ok((_, decoded)) => {
-                    let raw_bytes = match &decoded {
-                        RegistryValue::String(s) => s.as_bytes().to_vec(),
-                        RegistryValue::ExpandString(s) => s.as_bytes().to_vec(),
-                        RegistryValue::Dword(v) => v.to_le_bytes().to_vec(),
-                        RegistryValue::Qword(v) => v.to_le_bytes().to_vec(),
-                        RegistryValue::Binary(b) => b.clone(),
-                        RegistryValue::MultiString(parts) => parts.join("\0").as_bytes().to_vec(),
+                Ok((tn, raw_bytes, decoded, status)) => {
+                    let decoded_opt = match status {
+                        DecodingStatus::Decoded => Some(decoded),
+                        _ => None,
                     };
                     ValueReadResult::Success(RawRegistryValue {
                         key_path: path.to_string(),
                         value_name: value_name.clone(),
                         root,
-                        raw_type_id: type_name.to_raw_id(),
+                        raw_type_id: tn.to_raw_id(),
                         raw_bytes,
-                        decoded: Some(decoded),
-                        decoding_status: DecodingStatus::Decoded,
+                        decoded: decoded_opt,
+                        decoding_status: status,
                         source,
                     })
                 }
