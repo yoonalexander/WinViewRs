@@ -30,6 +30,8 @@ fn map_windows_error<E: std::fmt::Display>(e: E, root: RootKey, path: &str) -> R
     }
 }
 
+pub const MAX_DEPTH: usize = 32;
+
 pub struct WindowsRegistryReader;
 
 impl RegistryReader for WindowsRegistryReader {
@@ -118,6 +120,7 @@ impl RegistryReader for WindowsRegistryReader {
             };
         }
 
+        finalize_inspection_status(&mut snapshot);
         Ok(snapshot)
     }
 }
@@ -824,7 +827,7 @@ fn inspect_policies(reader: &WindowsRegistryReader, snapshot: &mut InspectionSna
 }
 
 fn inspect_key_tree(
-    reader: &WindowsRegistryReader,
+    reader: &dyn RegistryReader,
     root: RootKey,
     path: &str,
     source: ObservationSource,
@@ -832,8 +835,6 @@ fn inspect_key_tree(
     key_prefix: &str,
     depth: usize,
 ) {
-    const MAX_DEPTH: usize = 32;
-
     let map_key = if key_prefix.is_empty() {
         path.to_string()
     } else {
@@ -845,7 +846,7 @@ fn inspect_key_tree(
         snapshot.read_errors.push(InspectionError {
             key_path: path.to_string(),
             root,
-            operation: "traverse".to_string(),
+            operation: "depth_limit".to_string(),
             error: format!("Maximum recursion depth ({}) exceeded", MAX_DEPTH),
         });
         target.insert(map_key, snapshot);
@@ -916,4 +917,299 @@ fn inspect_key_tree(
     }
 
     target.insert(map_key.clone(), snapshot);
+}
+fn has_depth_limit_error(key: &KeySnapshot) -> bool {
+    key.read_errors.iter().any(|e| e.operation == "depth_limit")
+        || key.subkeys.values().any(has_depth_limit_error)
+}
+
+fn snapshot_has_depth_limit(snapshot: &InspectionSnapshot) -> bool {
+    [
+        &snapshot.bags,
+        &snapshot.streams,
+        &snapshot.clsid,
+        &snapshot.policies,
+    ]
+    .iter()
+    .any(|map| map.values().any(has_depth_limit_error))
+}
+
+fn finalize_inspection_status(snapshot: &mut InspectionSnapshot) {
+    let total_errors = snapshot.errors.len()
+        + snapshot.hkcu_folder_types.read_errors.len()
+        + snapshot.hklm_folder_types.read_errors.len()
+        + snapshot.advanced.read_errors.len();
+    let mut total = total_errors;
+    for ks in snapshot.bags.values() {
+        total += ks.read_errors.len();
+    }
+    for ks in snapshot.streams.values() {
+        total += ks.read_errors.len();
+    }
+    for ks in snapshot.clsid.values() {
+        total += ks.read_errors.len();
+    }
+    for ks in snapshot.policies.values() {
+        total += ks.read_errors.len();
+    }
+
+    let has_data = !snapshot.hkcu_folder_types.types.is_empty()
+        || !snapshot.hklm_folder_types.types.is_empty()
+        || !snapshot.bags.is_empty()
+        || !snapshot.streams.is_empty()
+        || !snapshot.advanced.values.is_empty()
+        || !snapshot.clsid.is_empty()
+        || !snapshot.policies.is_empty();
+
+    if snapshot_has_depth_limit(snapshot) {
+        snapshot.status = InspectionStatus::Partial {
+            reason: "Maximum recursion depth exceeded".to_string(),
+        };
+    } else if total == 0 {
+        snapshot.status = InspectionStatus::Complete;
+    } else if has_data {
+        snapshot.status = InspectionStatus::Partial {
+            reason: format!("{} read errors encountered", total),
+        };
+    } else {
+        snapshot.status = InspectionStatus::Failed {
+            error: format!("Inspection failed with {} errors", total),
+        };
+    }
+}
+
+#[cfg(test)]
+mod depth_tests {
+    use super::*;
+    use std::collections::BTreeMap;
+    use std::sync::Arc;
+    use winview_core::model::{InspectionSnapshot, KeySnapshot, ObservationSource};
+
+    struct FakeReader {
+        data: Arc<BTreeMap<String, Vec<String>>>,
+    }
+
+    impl FakeReader {
+        fn new(data: BTreeMap<String, Vec<String>>) -> Self {
+            Self {
+                data: Arc::new(data),
+            }
+        }
+    }
+
+    struct FakeKey {
+        path: String,
+        data: Arc<BTreeMap<String, Vec<String>>>,
+    }
+
+    impl RegistryKey for FakeKey {
+        fn enum_values(&self) -> RegistryResult<Vec<(String, ValueTypeName)>> {
+            Ok(vec![])
+        }
+        fn enum_subkeys(&self) -> RegistryResult<Vec<String>> {
+            Ok(self.data.get(&self.path).cloned().unwrap_or_default())
+        }
+        fn get_value(
+            &self,
+            _name: &str,
+        ) -> RegistryResult<(ValueTypeName, Vec<u8>, RegistryValue, DecodingStatus)> {
+            Err(RegistryError::ValueNotFound {
+                root: RootKey::Hkcu,
+                path: "".into(),
+                name: "".into(),
+            })
+        }
+        fn get_value_type(&self, _name: &str) -> RegistryResult<ValueTypeName> {
+            Ok(ValueTypeName::RegSz)
+        }
+        fn open_subkey(&self, name: &str) -> RegistryResult<Box<dyn RegistryKey>> {
+            let subpath = format!("{}\\{}", self.path, name);
+            if self.data.contains_key(&subpath) {
+                Ok(Box::new(FakeKey {
+                    path: subpath,
+                    data: self.data.clone(),
+                }))
+            } else {
+                Err(RegistryError::KeyNotFound {
+                    root: RootKey::Hkcu,
+                    path: subpath,
+                })
+            }
+        }
+    }
+
+    impl RegistryReader for FakeReader {
+        fn open_key(&self, _root: RootKey, path: &str) -> RegistryResult<Box<dyn RegistryKey>> {
+            if self.data.contains_key(path) {
+                Ok(Box::new(FakeKey {
+                    path: path.to_string(),
+                    data: self.data.clone(),
+                }))
+            } else {
+                Err(RegistryError::KeyNotFound {
+                    root: RootKey::Hkcu,
+                    path: path.to_string(),
+                })
+            }
+        }
+        fn enum_keys(&self, _root: RootKey, _path: &str) -> RegistryResult<Vec<String>> {
+            Ok(vec![])
+        }
+        fn get_value(
+            &self,
+            _root: RootKey,
+            _path: &str,
+            _name: &str,
+        ) -> RegistryResult<(ValueTypeName, Vec<u8>, RegistryValue, DecodingStatus)> {
+            Err(RegistryError::ValueNotFound {
+                root: RootKey::Hkcu,
+                path: "".into(),
+                name: "".into(),
+            })
+        }
+        fn get_value_type(
+            &self,
+            _root: RootKey,
+            _path: &str,
+            _name: &str,
+        ) -> RegistryResult<ValueTypeName> {
+            Ok(ValueTypeName::RegSz)
+        }
+        fn inspect_all(&self) -> RegistryResult<InspectionSnapshot> {
+            Ok(InspectionSnapshot::default())
+        }
+    }
+
+    fn build_hierarchy(depth: usize) -> FakeReader {
+        let mut data = BTreeMap::new();
+        let mut path = "root".to_string();
+        for i in 0..=depth {
+            let subkeys = if i < depth {
+                vec!["child".to_string()]
+            } else {
+                vec![]
+            };
+            data.insert(path.clone(), subkeys);
+            path = format!("{}\\child", path);
+        }
+        FakeReader::new(data)
+    }
+
+    fn has_depth_limit(ks: &KeySnapshot) -> bool {
+        ks.read_errors.iter().any(|e| e.operation == "depth_limit")
+            || ks.subkeys.values().any(has_depth_limit)
+    }
+
+    #[test]
+    fn depth_below_limit_no_error() {
+        let reader = build_hierarchy(30);
+        let mut target = BTreeMap::new();
+        inspect_key_tree(
+            &reader,
+            RootKey::Hkcu,
+            "root",
+            ObservationSource::HkcuBags,
+            &mut target,
+            "",
+            0,
+        );
+        assert!(target.values().all(|ks| !has_depth_limit(ks)));
+    }
+
+    #[test]
+    fn depth_at_boundary_no_error() {
+        let reader = build_hierarchy(31);
+        let mut target = BTreeMap::new();
+        inspect_key_tree(
+            &reader,
+            RootKey::Hkcu,
+            "root",
+            ObservationSource::HkcuBags,
+            &mut target,
+            "",
+            0,
+        );
+        assert!(target.values().all(|ks| !has_depth_limit(ks)));
+    }
+
+    #[test]
+    fn depth_beyond_limit_blocked() {
+        let reader = build_hierarchy(32);
+        let mut target = BTreeMap::new();
+        inspect_key_tree(
+            &reader,
+            RootKey::Hkcu,
+            "root",
+            ObservationSource::HkcuBags,
+            &mut target,
+            "",
+            0,
+        );
+        assert!(target.values().any(has_depth_limit));
+    }
+
+    #[test]
+    fn depth_limit_error_has_correct_root_and_path() {
+        let reader = build_hierarchy(32);
+        let mut target = BTreeMap::new();
+        inspect_key_tree(
+            &reader,
+            RootKey::Hkcu,
+            "root",
+            ObservationSource::HkcuBags,
+            &mut target,
+            "",
+            0,
+        );
+        fn find_err(ks: &KeySnapshot) -> Option<&InspectionError> {
+            ks.read_errors
+                .iter()
+                .find(|e| e.operation == "depth_limit")
+                .or_else(|| ks.subkeys.values().find_map(find_err))
+        }
+        let err = target
+            .values()
+            .find_map(find_err)
+            .expect("depth_limit error not found");
+        assert_eq!(err.root, RootKey::Hkcu);
+        assert!(err.key_path.contains("child"));
+    }
+
+    #[test]
+    fn depth_limit_preserves_parent_data() {
+        let reader = build_hierarchy(32);
+        let mut target = BTreeMap::new();
+        inspect_key_tree(
+            &reader,
+            RootKey::Hkcu,
+            "root",
+            ObservationSource::HkcuBags,
+            &mut target,
+            "",
+            0,
+        );
+        assert!(!target.is_empty());
+    }
+
+    #[test]
+    fn depth_limit_produces_partial_status() {
+        let mut snapshot = InspectionSnapshot::default();
+        let mut ks = KeySnapshot::default();
+        ks.read_errors.push(InspectionError {
+            key_path: "test".to_string(),
+            root: RootKey::Hkcu,
+            operation: "depth_limit".to_string(),
+            error: "Maximum recursion depth (32) exceeded".to_string(),
+        });
+        snapshot.bags.insert("test".to_string(), ks);
+        finalize_inspection_status(&mut snapshot);
+        assert!(matches!(snapshot.status, InspectionStatus::Partial { .. }));
+    }
+
+    #[test]
+    fn no_depth_limit_stays_complete() {
+        let mut snapshot = InspectionSnapshot::default();
+        finalize_inspection_status(&mut snapshot);
+        assert!(matches!(snapshot.status, InspectionStatus::Complete));
+    }
 }
