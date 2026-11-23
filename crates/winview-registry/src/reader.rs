@@ -12,6 +12,24 @@ use winview_core::model::{
 use winview_core::registry::keys::{RootKey, ValueTypeName};
 use winview_core::registry::traits::{RegistryError, RegistryKey, RegistryReader, RegistryResult};
 
+fn map_windows_error<E: std::fmt::Display>(e: E, root: RootKey, path: &str) -> RegistryError {
+    let msg = e.to_string();
+    let lower = msg.to_lowercase();
+    if lower.contains("not found") || lower.contains("cannot find") {
+        RegistryError::KeyNotFound {
+            root,
+            path: path.to_string(),
+        }
+    } else if lower.contains("access denied") || lower.contains("permission") {
+        RegistryError::AccessDenied {
+            root,
+            path: path.to_string(),
+        }
+    } else {
+        RegistryError::WindowsApi(msg)
+    }
+}
+
 pub struct WindowsRegistryReader;
 
 impl RegistryReader for WindowsRegistryReader {
@@ -19,10 +37,10 @@ impl RegistryReader for WindowsRegistryReader {
         let key = match root {
             RootKey::Hkcu => CURRENT_USER
                 .open(path)
-                .map_err(|e| RegistryError::WindowsApi(e.to_string()))?,
+                .map_err(|e| map_windows_error(e, root, path))?,
             RootKey::Hklm => LOCAL_MACHINE
                 .open(path)
-                .map_err(|e| RegistryError::WindowsApi(e.to_string()))?,
+                .map_err(|e| map_windows_error(e, root, path))?,
         };
         Ok(Box::new(WindowsRegistryKey(key)))
     }
@@ -134,7 +152,10 @@ impl RegistryKey for WindowsRegistryKey {
         Ok(results)
     }
 
-    fn get_value(&self, name: &str) -> RegistryResult<(ValueTypeName, Vec<u8>, RegistryValue, DecodingStatus)> {
+    fn get_value(
+        &self,
+        name: &str,
+    ) -> RegistryResult<(ValueTypeName, Vec<u8>, RegistryValue, DecodingStatus)> {
         let value = self
             .0
             .get_value(name)
@@ -292,7 +313,9 @@ fn decode_utf16_le(data: &[u8]) -> Result<String, String> {
         return Err("Odd byte length for UTF-16".into());
     }
     let u16s: Vec<u16> = data
-        .as_chunks::<2>().0.iter()
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|c| u16::from_le_bytes([c[0], c[1]]))
         .collect();
     // Find null terminator if present
@@ -308,7 +331,9 @@ fn decode_reg_multi_sz(data: &[u8]) -> Result<Vec<String>, String> {
         return Err("Odd byte length for REG_MULTI_SZ".into());
     }
     let u16s: Vec<u16> = data
-        .as_chunks::<2>().0.iter()
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|c| u16::from_le_bytes([c[0], c[1]]))
         .collect();
 
@@ -386,7 +411,8 @@ fn inspect_folder_types_hive(
     folder_types: &mut FolderTypesSnapshot,
 ) {
     use winview_core::registry::keys::paths::{
-        CANONICAL_NAME, COLUMN_LIST, COL_INFO, F_FLAGS, GROUP_ASCENDING, GROUP_BY, ICON_SIZE, LOGICAL_VIEW_MODE, MODE, SORT_BY_LIST,
+        CANONICAL_NAME, COLUMN_LIST, COL_INFO, F_FLAGS, GROUP_ASCENDING, GROUP_BY, ICON_SIZE,
+        LOGICAL_VIEW_MODE, MODE, SORT_BY_LIST,
     };
 
     // Open the FolderTypes key
@@ -435,13 +461,14 @@ fn inspect_folder_types_hive(
         };
 
         // Read CanonicalName
-        let canonical_name = guid_key
-            .get_value(CANONICAL_NAME)
-            .ok()
-            .and_then(|(_, _, v, _)| match v {
-                RegistryValue::String(s) => Some(s),
-                _ => None,
-            });
+        let canonical_name =
+            guid_key
+                .get_value(CANONICAL_NAME)
+                .ok()
+                .and_then(|(_, _, v, _)| match v {
+                    RegistryValue::String(s) => Some(s),
+                    _ => None,
+                });
 
         // Open TopViews\{00000000-0000-0000-0000-000000000000}
         let top_views_path = format!(

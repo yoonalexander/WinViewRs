@@ -23,10 +23,21 @@ pub fn run_inspect() -> Result<()> {
         snapshot.hkcu_folder_types.types.len()
     );
     for (guid, ft) in &snapshot.hkcu_folder_types.types {
-        println!("  {} ({})", ft.canonical_name.as_deref().unwrap_or("?"), guid);
+        println!(
+            "  {} ({})",
+            ft.canonical_name.as_deref().unwrap_or("?"),
+            guid
+        );
         for (view_guid, view) in &ft.top_views {
-            println!("    View {}: LVM={:?} Mode={:?} IconSize={:?} GroupBy={:?} SortBy={:?}",
-                view_guid, view.logical_view_mode, view.mode, view.icon_size, view.group_by, view.sort_by_list);
+            println!(
+                "    View {}: LVM={:?} Mode={:?} IconSize={:?} GroupBy={:?} SortBy={:?}",
+                view_guid,
+                view.logical_view_mode,
+                view.mode,
+                view.icon_size,
+                view.group_by,
+                view.sort_by_list
+            );
         }
     }
     println!(

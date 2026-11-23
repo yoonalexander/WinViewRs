@@ -2,9 +2,7 @@
 
 #[cfg(target_os = "windows")]
 mod integration {
-    use winview_core::model::{
-        ValueReadResult,
-    };
+    use winview_core::model::ValueReadResult;
     use winview_core::registry::keys::RootKey;
     use winview_core::registry::traits::RegistryReader;
     use winview_registry::WindowsRegistryReader;
@@ -182,7 +180,6 @@ mod integration {
         // Don't assert found_unknown — just documents the check
         let _ = found_unknown;
     }
-
 
     #[test]
     #[ignore = "requires Windows registry access"]

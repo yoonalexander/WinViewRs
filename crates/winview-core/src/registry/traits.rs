@@ -69,7 +69,10 @@ pub trait RegistryReader: Send + Sync {
 pub trait RegistryKey: Send {
     fn enum_values(&self) -> RegistryResult<Vec<(String, ValueTypeName)>>;
     fn enum_subkeys(&self) -> RegistryResult<Vec<String>>;
-    fn get_value(&self, name: &str) -> RegistryResult<(ValueTypeName, Vec<u8>, RegistryValue, DecodingStatus)>;
+    fn get_value(
+        &self,
+        name: &str,
+    ) -> RegistryResult<(ValueTypeName, Vec<u8>, RegistryValue, DecodingStatus)>;
     fn get_value_type(&self, name: &str) -> RegistryResult<ValueTypeName>;
     fn open_subkey(&self, name: &str) -> RegistryResult<Box<dyn RegistryKey>>;
 }
