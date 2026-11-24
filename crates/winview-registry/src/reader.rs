@@ -125,7 +125,7 @@ impl RegistryReader for WindowsRegistryReader {
         inspect_folder_types(self, &mut snapshot);
         inspect_bags(self, &mut snapshot);
         inspect_streams(self, &mut snapshot);
-        inspect_advanced(self, &mut snapshot);
+        inspect_advanced(self, &mut snapshot, MAX_VALUE_BYTES);
         inspect_clsid(self, &mut snapshot);
         inspect_policies(self, &mut snapshot);
 
@@ -745,7 +745,11 @@ fn inspect_streams(reader: &WindowsRegistryReader, snapshot: &mut InspectionSnap
     );
 }
 
-fn inspect_advanced(reader: &WindowsRegistryReader, snapshot: &mut InspectionSnapshot) {
+fn inspect_advanced(
+    reader: &dyn RegistryReader,
+    snapshot: &mut InspectionSnapshot,
+    max_value_bytes: usize,
+) {
     use winview_core::registry::keys::advanced_values::*;
     use winview_core::registry::keys::paths::ADVANCED;
 
@@ -777,6 +781,17 @@ fn inspect_advanced(reader: &WindowsRegistryReader, snapshot: &mut InspectionSna
         let value_result = key.get_value(value_name);
         let read_result = match value_result {
             Ok((tn, raw_bytes, decoded, status)) => {
+                if let Some(error) = check_value_size(
+                    RootKey::Hkcu,
+                    ADVANCED,
+                    value_name,
+                    raw_bytes.len(),
+                    max_value_bytes,
+                ) {
+                    snapshot.advanced.read_errors.push(error);
+                    continue;
+                }
+
                 let decoded_opt = match status {
                     DecodingStatus::Decoded => Some(decoded),
                     _ => None,
@@ -880,6 +895,28 @@ fn inspect_policies(reader: &WindowsRegistryReader, snapshot: &mut InspectionSna
     );
 }
 
+fn check_value_size(
+    root: RootKey,
+    path: &str,
+    value_name: &str,
+    actual_bytes: usize,
+    max_bytes: usize,
+) -> Option<InspectionError> {
+    if actual_bytes <= max_bytes {
+        return None;
+    }
+
+    Some(InspectionError {
+        key_path: path.to_string(),
+        root,
+        operation: "value_size_limit".to_string(),
+        error: format!(
+            "Registry value {:?} contains {} bytes, exceeding the {} byte limit",
+            value_name, actual_bytes, max_bytes
+        ),
+    })
+}
+
 #[allow(clippy::too_many_arguments)]
 fn inspect_key_tree(
     reader: &dyn RegistryReader,
@@ -972,19 +1009,14 @@ fn inspect_key_tree(
             let value_result = key.get_value(&value_name);
             let read_result = match value_result {
                 Ok((tn, raw_bytes, decoded, status)) => {
-                    if raw_bytes.len() > budget.max_value_bytes {
-                        snapshot.read_errors.push(InspectionError {
-                            key_path: path.to_string(),
-                            root,
-                            operation: "value_size_limit".to_string(),
-                            error: format!(
-                                "Registry value {:?} contains {} bytes, exceeding the {} byte limit",
-                                value_name,
-                                raw_bytes.len(),
-                                budget.max_value_bytes
-                            ),
-                        });
-
+                    if let Some(error) = check_value_size(
+                        root,
+                        path,
+                        &value_name,
+                        raw_bytes.len(),
+                        budget.max_value_bytes,
+                    ) {
+                        snapshot.read_errors.push(error);
                         continue;
                     }
 
@@ -1090,14 +1122,15 @@ fn has_value_size_limit_error(key: &KeySnapshot) -> bool {
 }
 
 fn snapshot_has_value_size_limit(snapshot: &InspectionSnapshot) -> bool {
-    [
-        &snapshot.bags,
-        &snapshot.streams,
-        &snapshot.clsid,
-        &snapshot.policies,
-    ]
-    .iter()
-    .any(|map| map.values().any(has_value_size_limit_error))
+    has_value_size_limit_error(&snapshot.advanced)
+        || [
+            &snapshot.bags,
+            &snapshot.streams,
+            &snapshot.clsid,
+            &snapshot.policies,
+        ]
+        .iter()
+        .any(|map| map.values().any(has_value_size_limit_error))
 }
 
 fn finalize_inspection_status(snapshot: &mut InspectionSnapshot) {
@@ -1932,5 +1965,134 @@ mod depth_tests {
         assert!(has_value_size_limit_error(root));
         assert!(has_value_size_limit_error(child));
         assert!(!budget.limit_exceeded);
+    }
+
+    #[test]
+    fn advanced_value_size_exact_limit() {
+        use winview_core::registry::keys::advanced_values::HIDE_FILE_EXT;
+        use winview_core::registry::keys::paths::ADVANCED;
+        use winview_core::test_support::FakeRegistryReader;
+
+        let reader = FakeRegistryReader::new();
+        reader.insert_value(
+            RootKey::Hkcu,
+            ADVANCED,
+            HIDE_FILE_EXT,
+            4,
+            42u32.to_le_bytes().to_vec(),
+            Some(RegistryValue::Dword(42)),
+        );
+
+        let mut snapshot = InspectionSnapshot::default();
+        inspect_advanced(&reader, &mut snapshot, 4);
+        finalize_inspection_status(&mut snapshot);
+
+        let value = snapshot
+            .advanced
+            .values
+            .get(HIDE_FILE_EXT)
+            .expect("HideFileExt missing");
+
+        match value {
+            ValueReadResult::Success(r) => {
+                assert_eq!(r.raw_bytes, vec![42u8, 0, 0, 0]);
+                assert!(matches!(r.decoded.as_ref(), Some(RegistryValue::Dword(42))));
+            }
+            _ => panic!("expected successful value read"),
+        }
+
+        assert!(!has_value_size_limit_error(&snapshot.advanced));
+        assert!(!snapshot_has_value_size_limit(&snapshot));
+        assert!(matches!(snapshot.status, InspectionStatus::Complete));
+    }
+
+    #[test]
+    fn advanced_oversized_value_is_omitted() {
+        use winview_core::registry::keys::advanced_values::HIDE_FILE_EXT;
+        use winview_core::registry::keys::paths::ADVANCED;
+        use winview_core::test_support::FakeRegistryReader;
+
+        let reader = FakeRegistryReader::new();
+        reader.insert_value(
+            RootKey::Hkcu,
+            ADVANCED,
+            HIDE_FILE_EXT,
+            4,
+            42u32.to_le_bytes().to_vec(),
+            Some(RegistryValue::Dword(42)),
+        );
+
+        let mut snapshot = InspectionSnapshot::default();
+        inspect_advanced(&reader, &mut snapshot, 3);
+        finalize_inspection_status(&mut snapshot);
+
+        assert!(!snapshot.advanced.values.contains_key(HIDE_FILE_EXT));
+        assert!(has_value_size_limit_error(&snapshot.advanced));
+        assert!(snapshot_has_value_size_limit(&snapshot));
+        assert!(matches!(snapshot.status, InspectionStatus::Partial { .. }));
+
+        let err = snapshot
+            .advanced
+            .read_errors
+            .iter()
+            .find(|e| e.operation == "value_size_limit")
+            .expect("value size error missing");
+
+        assert_eq!(err.root, RootKey::Hkcu);
+        assert_eq!(err.key_path, ADVANCED);
+        assert!(err.error.contains(HIDE_FILE_EXT));
+    }
+
+    #[test]
+    fn advanced_oversized_value_does_not_block_other_values() {
+        use winview_core::registry::keys::advanced_values::{HIDE_FILE_EXT, USE_COMPACT_MODE};
+        use winview_core::registry::keys::paths::ADVANCED;
+        use winview_core::test_support::FakeRegistryReader;
+
+        let reader = FakeRegistryReader::new();
+        reader.insert_value(
+            RootKey::Hkcu,
+            ADVANCED,
+            HIDE_FILE_EXT,
+            11,
+            1u64.to_le_bytes().to_vec(),
+            Some(RegistryValue::Qword(1)),
+        );
+        reader.insert_value(
+            RootKey::Hkcu,
+            ADVANCED,
+            USE_COMPACT_MODE,
+            4,
+            42u32.to_le_bytes().to_vec(),
+            Some(RegistryValue::Dword(42)),
+        );
+
+        let mut snapshot = InspectionSnapshot::default();
+        inspect_advanced(&reader, &mut snapshot, 4);
+        finalize_inspection_status(&mut snapshot);
+
+        assert!(!snapshot.advanced.values.contains_key(HIDE_FILE_EXT));
+
+        let value = snapshot
+            .advanced
+            .values
+            .get(USE_COMPACT_MODE)
+            .expect("UseCompactMode missing");
+
+        match value {
+            ValueReadResult::Success(r) => {
+                assert_eq!(r.raw_bytes, vec![42u8, 0, 0, 0]);
+                assert!(matches!(r.decoded.as_ref(), Some(RegistryValue::Dword(42))));
+            }
+            _ => panic!("expected successful value read"),
+        }
+
+        let count = snapshot
+            .advanced
+            .read_errors
+            .iter()
+            .filter(|e| e.operation == "value_size_limit")
+            .count();
+        assert_eq!(count, 1);
     }
 }
