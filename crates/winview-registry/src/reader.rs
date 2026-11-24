@@ -166,31 +166,6 @@ impl RegistryReader for WindowsRegistryReader {
 
         inspect_policies(self, &mut snapshot, &mut snapshot_budget);
 
-        // Determine inspection status based on collected errors
-        let total_errors = snapshot.errors.len()
-            + snapshot.hkcu_folder_types.read_errors.len()
-            + snapshot.hklm_folder_types.read_errors.len()
-            + snapshot.advanced.read_errors.len();
-        let has_data = !snapshot.hkcu_folder_types.types.is_empty()
-            || !snapshot.hklm_folder_types.types.is_empty()
-            || !snapshot.bags.is_empty()
-            || !snapshot.streams.is_empty()
-            || !snapshot.advanced.values.is_empty()
-            || !snapshot.clsid.is_empty()
-            || !snapshot.policies.is_empty();
-
-        if total_errors == 0 {
-            snapshot.status = InspectionStatus::Complete;
-        } else if has_data {
-            snapshot.status = InspectionStatus::Partial {
-                reason: format!("{} read errors encountered", total_errors),
-            };
-        } else {
-            snapshot.status = InspectionStatus::Failed {
-                error: format!("Inspection failed with {} errors", total_errors),
-            };
-        }
-
         finalize_inspection_status(&mut snapshot);
         Ok(snapshot)
     }
@@ -1345,24 +1320,42 @@ fn snapshot_has_snapshot_size_limit(snapshot: &InspectionSnapshot) -> bool {
         .any(|map| map.values().any(has_snapshot_size_limit_error))
 }
 
+fn count_key_read_errors(key: &KeySnapshot) -> usize {
+    key.read_errors.len()
+        + key
+            .subkeys
+            .values()
+            .map(count_key_read_errors)
+            .sum::<usize>()
+}
+
+fn count_folder_types_read_errors(folder_types: &FolderTypesSnapshot) -> usize {
+    folder_types.read_errors.len()
+        + folder_types
+            .types
+            .values()
+            .map(|folder| folder.read_errors.len())
+            .sum::<usize>()
+}
+
+fn count_snapshot_read_errors(snapshot: &InspectionSnapshot) -> usize {
+    snapshot.errors.len()
+        + count_folder_types_read_errors(&snapshot.hkcu_folder_types)
+        + count_folder_types_read_errors(&snapshot.hklm_folder_types)
+        + count_key_read_errors(&snapshot.advanced)
+        + [
+            &snapshot.bags,
+            &snapshot.streams,
+            &snapshot.clsid,
+            &snapshot.policies,
+        ]
+        .iter()
+        .map(|domain| domain.values().map(count_key_read_errors).sum::<usize>())
+        .sum::<usize>()
+}
+
 fn finalize_inspection_status(snapshot: &mut InspectionSnapshot) {
-    let total_errors = snapshot.errors.len()
-        + snapshot.hkcu_folder_types.read_errors.len()
-        + snapshot.hklm_folder_types.read_errors.len()
-        + snapshot.advanced.read_errors.len();
-    let mut total = total_errors;
-    for ks in snapshot.bags.values() {
-        total += ks.read_errors.len();
-    }
-    for ks in snapshot.streams.values() {
-        total += ks.read_errors.len();
-    }
-    for ks in snapshot.clsid.values() {
-        total += ks.read_errors.len();
-    }
-    for ks in snapshot.policies.values() {
-        total += ks.read_errors.len();
-    }
+    let total = count_snapshot_read_errors(snapshot);
 
     let has_data = !snapshot.hkcu_folder_types.types.is_empty()
         || !snapshot.hklm_folder_types.types.is_empty()
@@ -3266,5 +3259,233 @@ mod depth_tests {
         assert_eq!(snapshot_budget.captured_bytes, 4);
 
         assert!(matches!(snapshot.status, InspectionStatus::Partial { .. }));
+    }
+
+    #[test]
+    fn nested_open_key_failure_produces_partial_status() {
+        let mut data = BTreeMap::new();
+
+        data.insert("root".to_string(), vec!["missing_child".to_string()]);
+
+        // Deliberately do not register the child path.
+        let reader = FakeReader::new(data);
+
+        let mut snapshot = InspectionSnapshot::default();
+        let mut budget = TraversalBudget::new(MAX_KEYS_PER_DOMAIN);
+
+        let mut snapshot_budget = SnapshotBudget::new(MAX_SNAPSHOT_BYTES);
+
+        inspect_key_tree(
+            &reader,
+            RootKey::Hkcu,
+            "root",
+            ObservationSource::HkcuBags,
+            &mut snapshot.bags,
+            "",
+            0,
+            &mut budget,
+            &mut snapshot_budget,
+        );
+
+        finalize_inspection_status(&mut snapshot);
+
+        let root = snapshot.bags.get("root").expect("root missing");
+
+        assert!(matches!(
+            root.values.get("TestValue"),
+            Some(ValueReadResult::Success(_))
+        ));
+
+        let child = root
+            .subkeys
+            .get(r"root\missing_child")
+            .expect("child error snapshot missing");
+
+        assert_eq!(child.read_errors.len(), 1);
+        assert_eq!(child.read_errors[0].operation, "open_key");
+
+        assert_eq!(count_snapshot_read_errors(&snapshot), 1);
+
+        assert!(matches!(snapshot.status, InspectionStatus::Partial { .. }));
+    }
+
+    #[test]
+    fn key_error_count_includes_all_depths() {
+        let mut root = KeySnapshot::default();
+        root.read_errors.push(InspectionError {
+            key_path: "root".to_string(),
+            root: RootKey::Hkcu,
+            operation: "open_key".to_string(),
+            error: "boom".to_string(),
+        });
+
+        let mut child1 = KeySnapshot::default();
+        child1.read_errors.push(InspectionError {
+            key_path: r"root\child1".to_string(),
+            root: RootKey::Hkcu,
+            operation: "open_key".to_string(),
+            error: "boom".to_string(),
+        });
+        let mut child2 = KeySnapshot::default();
+        child2.read_errors.push(InspectionError {
+            key_path: r"root\child2".to_string(),
+            root: RootKey::Hkcu,
+            operation: "open_key".to_string(),
+            error: "boom".to_string(),
+        });
+
+        let mut grandchild = KeySnapshot::default();
+        grandchild.read_errors.push(InspectionError {
+            key_path: r"root\child1\grandchild".to_string(),
+            root: RootKey::Hkcu,
+            operation: "open_key".to_string(),
+            error: "boom".to_string(),
+        });
+        child1
+            .subkeys
+            .insert(r"root\child1\grandchild".to_string(), grandchild);
+
+        root.subkeys.insert(r"root\child1".to_string(), child1);
+        root.subkeys.insert(r"root\child2".to_string(), child2);
+
+        assert_eq!(count_key_read_errors(&root), 4);
+    }
+
+    #[test]
+    fn folder_types_error_count_includes_nested_records() {
+        let mut folder_types = FolderTypesSnapshot::default();
+        folder_types.read_errors.push(InspectionError {
+            key_path: "FolderTypes".to_string(),
+            root: RootKey::Hkcu,
+            operation: "open_key".to_string(),
+            error: "boom".to_string(),
+        });
+
+        let mut folder = FolderTypeSnapshot {
+            guid: "{00000000-0000-0000-0000-000000000000}".to_string(),
+            canonical_name: None,
+            top_views: BTreeMap::new(),
+            read_errors: Vec::new(),
+        };
+        folder.read_errors.push(InspectionError {
+            key_path: r"FolderTypes\{00000000-0000-0000-0000-000000000000}".to_string(),
+            root: RootKey::Hkcu,
+            operation: "open_key".to_string(),
+            error: "boom".to_string(),
+        });
+        folder.read_errors.push(InspectionError {
+            key_path: r"FolderTypes\{00000000-0000-0000-0000-000000000000}\TopViews\{00000000-0000-0000-0000-000000000000}".to_string(),
+            root: RootKey::Hkcu,
+            operation: "open_key".to_string(),
+            error: "boom".to_string(),
+        });
+
+        folder_types
+            .types
+            .insert("{00000000-0000-0000-0000-000000000000}".to_string(), folder);
+
+        assert_eq!(count_folder_types_read_errors(&folder_types), 3);
+    }
+
+    #[test]
+    fn snapshot_error_count_covers_all_domains() {
+        let mut snapshot = InspectionSnapshot::default();
+
+        let err = |key_path: &str, operation: &str| InspectionError {
+            key_path: key_path.to_string(),
+            root: RootKey::Hkcu,
+            operation: operation.to_string(),
+            error: "boom".to_string(),
+        };
+
+        // snapshot.errors
+        snapshot.errors.push(err("snapshot", "open_key"));
+
+        // HKCU FolderTypes
+        snapshot
+            .hkcu_folder_types
+            .read_errors
+            .push(err("HKCU\\FolderTypes", "open_key"));
+
+        // HKLM FolderTypes
+        snapshot
+            .hklm_folder_types
+            .read_errors
+            .push(err("HKLM\\FolderTypes", "open_key"));
+
+        // Advanced
+        snapshot
+            .advanced
+            .read_errors
+            .push(err("Advanced", "open_key"));
+
+        // Bags — nested child error
+        let mut bags_root = KeySnapshot::default();
+        let mut bags_child = KeySnapshot::default();
+        bags_child
+            .read_errors
+            .push(err(r"Bags\root\child", "open_key"));
+        bags_root
+            .subkeys
+            .insert(r"Bags\root\child".to_string(), bags_child);
+        snapshot.bags.insert("Bags\\root".to_string(), bags_root);
+
+        // Streams — nested child error
+        let mut streams_root = KeySnapshot::default();
+        let mut streams_child = KeySnapshot::default();
+        streams_child
+            .read_errors
+            .push(err(r"Streams\root\child", "open_key"));
+        streams_root
+            .subkeys
+            .insert(r"Streams\root\child".to_string(), streams_child);
+        snapshot
+            .streams
+            .insert("Streams\\root".to_string(), streams_root);
+
+        // CLSID — nested child error
+        let mut clsid_root = KeySnapshot::default();
+        let mut clsid_child = KeySnapshot::default();
+        clsid_child
+            .read_errors
+            .push(err(r"CLSID\root\child", "open_key"));
+        clsid_root
+            .subkeys
+            .insert(r"CLSID\root\child".to_string(), clsid_child);
+        snapshot.clsid.insert("CLSID\\root".to_string(), clsid_root);
+
+        // Policies — nested child error
+        let mut policies_root = KeySnapshot::default();
+        let mut policies_child = KeySnapshot::default();
+        policies_child
+            .read_errors
+            .push(err(r"Policies\root\child", "open_key"));
+        policies_root
+            .subkeys
+            .insert(r"Policies\root\child".to_string(), policies_child);
+        snapshot
+            .policies
+            .insert("Policies\\root".to_string(), policies_root);
+
+        assert_eq!(count_snapshot_read_errors(&snapshot), 8);
+
+        finalize_inspection_status(&mut snapshot);
+
+        assert!(matches!(
+            snapshot.status,
+            InspectionStatus::Partial { reason }
+                if reason == "8 read errors encountered"
+        ));
+    }
+
+    #[test]
+    fn no_recorded_errors_remains_complete() {
+        let mut snapshot = InspectionSnapshot::default();
+
+        assert_eq!(count_snapshot_read_errors(&snapshot), 0);
+
+        finalize_inspection_status(&mut snapshot);
+
+        assert!(matches!(snapshot.status, InspectionStatus::Complete));
     }
 }
