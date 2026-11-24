@@ -32,6 +32,31 @@ fn map_windows_error<E: std::fmt::Display>(e: E, root: RootKey, path: &str) -> R
 
 pub const MAX_DEPTH: usize = 32;
 
+const MAX_KEYS_PER_DOMAIN: usize = 50_000;
+
+struct TraversalBudget {
+    visited_keys: usize,
+    max_keys: usize,
+}
+
+impl TraversalBudget {
+    fn new(max_keys: usize) -> Self {
+        Self {
+            visited_keys: 0,
+            max_keys,
+        }
+    }
+
+    fn record_visit(&mut self) {
+        self.visited_keys += 1;
+    }
+
+    #[allow(dead_code)]
+    fn is_exhausted(&self) -> bool {
+        self.visited_keys >= self.max_keys
+    }
+}
+
 pub struct WindowsRegistryReader;
 
 impl RegistryReader for WindowsRegistryReader {
@@ -620,6 +645,8 @@ fn inspect_bags(reader: &WindowsRegistryReader, snapshot: &mut InspectionSnapsho
         ALL_FOLDERS_COMDLG, ALL_FOLDERS_COMDLG_LEGACY, ALL_FOLDERS_SHELL, BAGS, BAG_MRU,
     };
 
+    let mut budget = TraversalBudget::new(MAX_KEYS_PER_DOMAIN);
+
     inspect_key_tree(
         reader,
         RootKey::Hkcu,
@@ -628,6 +655,7 @@ fn inspect_bags(reader: &WindowsRegistryReader, snapshot: &mut InspectionSnapsho
         &mut snapshot.bags,
         "",
         0,
+        &mut budget,
     );
     inspect_key_tree(
         reader,
@@ -637,6 +665,7 @@ fn inspect_bags(reader: &WindowsRegistryReader, snapshot: &mut InspectionSnapsho
         &mut snapshot.bags,
         "",
         0,
+        &mut budget,
     );
     inspect_key_tree(
         reader,
@@ -646,6 +675,7 @@ fn inspect_bags(reader: &WindowsRegistryReader, snapshot: &mut InspectionSnapsho
         &mut snapshot.bags,
         "",
         0,
+        &mut budget,
     );
     inspect_key_tree(
         reader,
@@ -655,6 +685,7 @@ fn inspect_bags(reader: &WindowsRegistryReader, snapshot: &mut InspectionSnapsho
         &mut snapshot.bags,
         "",
         0,
+        &mut budget,
     );
     inspect_key_tree(
         reader,
@@ -664,11 +695,14 @@ fn inspect_bags(reader: &WindowsRegistryReader, snapshot: &mut InspectionSnapsho
         &mut snapshot.bags,
         "",
         0,
+        &mut budget,
     );
 }
 
 fn inspect_streams(reader: &WindowsRegistryReader, snapshot: &mut InspectionSnapshot) {
     use winview_core::registry::keys::paths::{DESKTOP, STREAMS, STREAMS_DEFAULTS};
+
+    let mut budget = TraversalBudget::new(MAX_KEYS_PER_DOMAIN);
 
     inspect_key_tree(
         reader,
@@ -678,6 +712,7 @@ fn inspect_streams(reader: &WindowsRegistryReader, snapshot: &mut InspectionSnap
         &mut snapshot.streams,
         "",
         0,
+        &mut budget,
     );
     inspect_key_tree(
         reader,
@@ -687,6 +722,7 @@ fn inspect_streams(reader: &WindowsRegistryReader, snapshot: &mut InspectionSnap
         &mut snapshot.streams,
         "",
         0,
+        &mut budget,
     );
     inspect_key_tree(
         reader,
@@ -696,6 +732,7 @@ fn inspect_streams(reader: &WindowsRegistryReader, snapshot: &mut InspectionSnap
         &mut snapshot.streams,
         "",
         0,
+        &mut budget,
     );
 }
 
@@ -756,6 +793,7 @@ fn inspect_advanced(reader: &WindowsRegistryReader, snapshot: &mut InspectionSna
 }
 
 fn inspect_clsid(reader: &WindowsRegistryReader, snapshot: &mut InspectionSnapshot) {
+    let mut budget = TraversalBudget::new(MAX_KEYS_PER_DOMAIN);
     use winview_core::registry::keys::paths::*;
 
     let clsid_paths = [
@@ -781,12 +819,15 @@ fn inspect_clsid(reader: &WindowsRegistryReader, snapshot: &mut InspectionSnapsh
             &mut snapshot.clsid,
             "",
             0,
+            &mut budget,
         );
     }
 }
 
 fn inspect_policies(reader: &WindowsRegistryReader, snapshot: &mut InspectionSnapshot) {
     use winview_core::registry::keys::paths::*;
+
+    let mut budget = TraversalBudget::new(MAX_KEYS_PER_DOMAIN);
 
     inspect_key_tree(
         reader,
@@ -796,6 +837,7 @@ fn inspect_policies(reader: &WindowsRegistryReader, snapshot: &mut InspectionSna
         &mut snapshot.policies,
         "",
         0,
+        &mut budget,
     );
     inspect_key_tree(
         reader,
@@ -805,6 +847,7 @@ fn inspect_policies(reader: &WindowsRegistryReader, snapshot: &mut InspectionSna
         &mut snapshot.policies,
         "",
         0,
+        &mut budget,
     );
     inspect_key_tree(
         reader,
@@ -814,6 +857,7 @@ fn inspect_policies(reader: &WindowsRegistryReader, snapshot: &mut InspectionSna
         &mut snapshot.policies,
         "HKLM",
         0,
+        &mut budget,
     );
     inspect_key_tree(
         reader,
@@ -823,9 +867,11 @@ fn inspect_policies(reader: &WindowsRegistryReader, snapshot: &mut InspectionSna
         &mut snapshot.policies,
         "",
         0,
+        &mut budget,
     );
 }
 
+#[allow(clippy::too_many_arguments)]
 fn inspect_key_tree(
     reader: &dyn RegistryReader,
     root: RootKey,
@@ -834,6 +880,7 @@ fn inspect_key_tree(
     target: &mut BTreeMap<String, KeySnapshot>,
     key_prefix: &str,
     depth: usize,
+    budget: &mut TraversalBudget,
 ) {
     let map_key = if key_prefix.is_empty() {
         path.to_string()
@@ -852,6 +899,8 @@ fn inspect_key_tree(
         target.insert(map_key, snapshot);
         return;
     }
+
+    budget.record_visit();
 
     let key_result = reader.open_key(root, path);
     let key = match key_result {
@@ -912,6 +961,7 @@ fn inspect_key_tree(
                 &mut snapshot.subkeys,
                 "",
                 depth + 1,
+                budget,
             );
         }
     }
@@ -1104,6 +1154,7 @@ mod depth_tests {
     fn depth_below_limit_no_error() {
         let reader = build_hierarchy(30);
         let mut target = BTreeMap::new();
+        let mut budget = TraversalBudget::new(MAX_KEYS_PER_DOMAIN);
         inspect_key_tree(
             &reader,
             RootKey::Hkcu,
@@ -1112,6 +1163,7 @@ mod depth_tests {
             &mut target,
             "",
             0,
+            &mut budget,
         );
         assert!(target.values().all(|ks| !has_depth_limit(ks)));
     }
@@ -1120,6 +1172,7 @@ mod depth_tests {
     fn depth_at_boundary_no_error() {
         let reader = build_hierarchy(31);
         let mut target = BTreeMap::new();
+        let mut budget = TraversalBudget::new(MAX_KEYS_PER_DOMAIN);
         inspect_key_tree(
             &reader,
             RootKey::Hkcu,
@@ -1128,6 +1181,7 @@ mod depth_tests {
             &mut target,
             "",
             0,
+            &mut budget,
         );
         assert!(target.values().all(|ks| !has_depth_limit(ks)));
     }
@@ -1136,6 +1190,7 @@ mod depth_tests {
     fn depth_beyond_limit_blocked() {
         let reader = build_hierarchy(32);
         let mut target = BTreeMap::new();
+        let mut budget = TraversalBudget::new(MAX_KEYS_PER_DOMAIN);
         inspect_key_tree(
             &reader,
             RootKey::Hkcu,
@@ -1144,6 +1199,7 @@ mod depth_tests {
             &mut target,
             "",
             0,
+            &mut budget,
         );
         assert!(target.values().any(has_depth_limit));
     }
@@ -1152,6 +1208,7 @@ mod depth_tests {
     fn depth_limit_error_has_correct_root_and_path() {
         let reader = build_hierarchy(32);
         let mut target = BTreeMap::new();
+        let mut budget = TraversalBudget::new(MAX_KEYS_PER_DOMAIN);
         inspect_key_tree(
             &reader,
             RootKey::Hkcu,
@@ -1160,6 +1217,7 @@ mod depth_tests {
             &mut target,
             "",
             0,
+            &mut budget,
         );
         fn find_err(ks: &KeySnapshot) -> Option<&InspectionError> {
             ks.read_errors
@@ -1179,6 +1237,7 @@ mod depth_tests {
     fn depth_limit_preserves_parent_data() {
         let reader = build_hierarchy(32);
         let mut target = BTreeMap::new();
+        let mut budget = TraversalBudget::new(MAX_KEYS_PER_DOMAIN);
         inspect_key_tree(
             &reader,
             RootKey::Hkcu,
@@ -1187,6 +1246,7 @@ mod depth_tests {
             &mut target,
             "",
             0,
+            &mut budget,
         );
         assert!(!target.is_empty());
     }
