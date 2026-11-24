@@ -428,6 +428,7 @@ fn inspect_folder_types(reader: &WindowsRegistryReader, snapshot: &mut Inspectio
         HKCU_FOLDER_TYPES,
         ObservationSource::HkcuFolderTypes,
         &mut snapshot.hkcu_folder_types,
+        MAX_VALUE_BYTES,
     );
 
     // HKLM FolderTypes
@@ -437,15 +438,17 @@ fn inspect_folder_types(reader: &WindowsRegistryReader, snapshot: &mut Inspectio
         HKLM_FOLDER_TYPES,
         ObservationSource::HklmFolderTypes,
         &mut snapshot.hklm_folder_types,
+        MAX_VALUE_BYTES,
     );
 }
 
 fn inspect_folder_types_hive(
-    reader: &WindowsRegistryReader,
+    reader: &dyn RegistryReader,
     root: RootKey,
     path: &str,
     source: ObservationSource,
     folder_types: &mut FolderTypesSnapshot,
+    max_value_bytes: usize,
 ) {
     use winview_core::registry::keys::paths::{
         CANONICAL_NAME, COLUMN_LIST, COL_INFO, F_FLAGS, GROUP_ASCENDING, GROUP_BY, ICON_SIZE,
@@ -498,14 +501,28 @@ fn inspect_folder_types_hive(
         };
 
         // Read CanonicalName
-        let canonical_name =
-            guid_key
-                .get_value(CANONICAL_NAME)
-                .ok()
-                .and_then(|(_, _, v, _)| match v {
-                    RegistryValue::String(s) => Some(s),
-                    _ => None,
-                });
+        let canonical_name = match guid_key.get_value(CANONICAL_NAME) {
+            Ok((_, raw_bytes, decoded, status)) => {
+                if let Some(error) = check_value_size(
+                    root,
+                    &guid_path,
+                    CANONICAL_NAME,
+                    raw_bytes.len(),
+                    max_value_bytes,
+                ) {
+                    folder_types.read_errors.push(error);
+                    None
+                } else if status == DecodingStatus::Decoded {
+                    match decoded {
+                        RegistryValue::String(s) => Some(s),
+                        _ => None,
+                    }
+                } else {
+                    None
+                }
+            }
+            Err(_) => None,
+        };
 
         // Open TopViews\{00000000-0000-0000-0000-000000000000}
         let top_views_path = format!(
@@ -544,6 +561,17 @@ fn inspect_folder_types_hive(
             let value_result = top_views_key.get_value(const_name);
             let read_result = match value_result {
                 Ok((tn, raw_bytes, decoded, status)) => {
+                    if let Some(error) = check_value_size(
+                        root,
+                        &top_views_path,
+                        const_name,
+                        raw_bytes.len(),
+                        max_value_bytes,
+                    ) {
+                        folder_types.read_errors.push(error);
+                        continue;
+                    }
+
                     let decoded_opt = match status {
                         DecodingStatus::Decoded => Some(decoded),
                         _ => None,
@@ -1122,7 +1150,17 @@ fn has_value_size_limit_error(key: &KeySnapshot) -> bool {
 }
 
 fn snapshot_has_value_size_limit(snapshot: &InspectionSnapshot) -> bool {
-    has_value_size_limit_error(&snapshot.advanced)
+    snapshot
+        .hkcu_folder_types
+        .read_errors
+        .iter()
+        .any(|e| e.operation == "value_size_limit")
+        || snapshot
+            .hklm_folder_types
+            .read_errors
+            .iter()
+            .any(|e| e.operation == "value_size_limit")
+        || has_value_size_limit_error(&snapshot.advanced)
         || [
             &snapshot.bags,
             &snapshot.streams,
@@ -1196,9 +1234,14 @@ mod depth_tests {
     use std::sync::{Arc, Mutex};
     use winview_core::model::{InspectionSnapshot, KeySnapshot, ObservationSource};
 
+    type FakeValue = (u32, Vec<u8>, Option<RegistryValue>, DecodingStatus);
+
+    type FakeValues = BTreeMap<String, BTreeMap<String, FakeValue>>;
+
     struct FakeReader {
         data: Arc<BTreeMap<String, Vec<String>>>,
         opened_keys: Mutex<Vec<(RootKey, String)>>,
+        values: Arc<FakeValues>,
     }
 
     impl FakeReader {
@@ -1206,6 +1249,15 @@ mod depth_tests {
             Self {
                 data: Arc::new(data),
                 opened_keys: Mutex::new(Vec::new()),
+                values: Arc::new(FakeValues::new()),
+            }
+        }
+
+        fn with_values(data: BTreeMap<String, Vec<String>>, values: FakeValues) -> Self {
+            Self {
+                data: Arc::new(data),
+                opened_keys: Mutex::new(Vec::new()),
+                values: Arc::new(values),
             }
         }
     }
@@ -1213,11 +1265,19 @@ mod depth_tests {
     struct FakeKey {
         path: String,
         data: Arc<BTreeMap<String, Vec<String>>>,
+        values: Arc<FakeValues>,
     }
 
     impl RegistryKey for FakeKey {
         fn enum_values(&self) -> RegistryResult<Vec<(String, ValueTypeName)>> {
-            Ok(vec![("TestValue".to_string(), ValueTypeName::RegDword)])
+            if let Some(vals) = self.values.get(&self.path) {
+                Ok(vals
+                    .iter()
+                    .map(|(name, (type_id, _, _, _))| (name.clone(), type_id_to_name(*type_id)))
+                    .collect())
+            } else {
+                Ok(vec![("TestValue".to_string(), ValueTypeName::RegDword)])
+            }
         }
         fn enum_subkeys(&self) -> RegistryResult<Vec<String>> {
             Ok(self.data.get(&self.path).cloned().unwrap_or_default())
@@ -1226,6 +1286,20 @@ mod depth_tests {
             &self,
             name: &str,
         ) -> RegistryResult<(ValueTypeName, Vec<u8>, RegistryValue, DecodingStatus)> {
+            if let Some(vals) = self.values.get(&self.path) {
+                if let Some((type_id, raw_bytes, decoded, status)) = vals.get(name) {
+                    let decoded = decoded.clone().ok_or(RegistryError::InvalidData(
+                        "no decoded value in fake".into(),
+                    ))?;
+                    return Ok((
+                        type_id_to_name(*type_id),
+                        raw_bytes.clone(),
+                        decoded,
+                        status.clone(),
+                    ));
+                }
+            }
+
             if name == "TestValue" {
                 Ok((
                     ValueTypeName::RegDword,
@@ -1242,6 +1316,11 @@ mod depth_tests {
             }
         }
         fn get_value_type(&self, name: &str) -> RegistryResult<ValueTypeName> {
+            if let Some(vals) = self.values.get(&self.path) {
+                if let Some((type_id, _, _, _)) = vals.get(name) {
+                    return Ok(type_id_to_name(*type_id));
+                }
+            }
             if name == "TestValue" {
                 Ok(ValueTypeName::RegDword)
             } else {
@@ -1254,6 +1333,7 @@ mod depth_tests {
                 Ok(Box::new(FakeKey {
                     path: subpath,
                     data: self.data.clone(),
+                    values: self.values.clone(),
                 }))
             } else {
                 Err(RegistryError::KeyNotFound {
@@ -1275,6 +1355,7 @@ mod depth_tests {
                 Ok(Box::new(FakeKey {
                     path: path.to_string(),
                     data: self.data.clone(),
+                    values: self.values.clone(),
                 }))
             } else {
                 Err(RegistryError::KeyNotFound {
@@ -1329,6 +1410,93 @@ mod depth_tests {
     fn has_depth_limit(ks: &KeySnapshot) -> bool {
         ks.read_errors.iter().any(|e| e.operation == "depth_limit")
             || ks.subkeys.values().any(has_depth_limit)
+    }
+
+    fn type_id_to_name(id: u32) -> ValueTypeName {
+        match id {
+            1 => ValueTypeName::RegSz,
+            2 => ValueTypeName::RegExpandSz,
+            3 => ValueTypeName::RegBinary,
+            4 => ValueTypeName::RegDword,
+            7 => ValueTypeName::RegMultiSz,
+            11 => ValueTypeName::RegQword,
+            _ => ValueTypeName::Other(id),
+        }
+    }
+
+    const TEST_FOLDER_TYPES: &str = "FolderTypes";
+
+    const TEST_FOLDER_GUID: &str = "{11111111-1111-1111-1111-111111111111}";
+
+    const TEST_VIEW_GUID: &str = "{00000000-0000-0000-0000-000000000000}";
+
+    fn build_folder_types_fixture(
+        canonical_name: Option<&str>,
+        include_col_info: bool,
+    ) -> FakeReader {
+        let guid_path = format!(r"{}\{}", TEST_FOLDER_TYPES, TEST_FOLDER_GUID);
+
+        let view_path = format!(r"{}\TopViews\{}", guid_path, TEST_VIEW_GUID);
+
+        let mut data = BTreeMap::new();
+
+        data.insert(
+            TEST_FOLDER_TYPES.to_string(),
+            vec![TEST_FOLDER_GUID.to_string()],
+        );
+
+        data.insert(guid_path.clone(), Vec::new());
+        data.insert(view_path.clone(), Vec::new());
+
+        let mut values = FakeValues::new();
+
+        if let Some(name) = canonical_name {
+            let raw_bytes: Vec<u8> = name
+                .encode_utf16()
+                .chain(std::iter::once(0))
+                .flat_map(|unit| unit.to_le_bytes())
+                .collect();
+
+            values.entry(guid_path).or_default().insert(
+                "CanonicalName".to_string(),
+                (
+                    1,
+                    raw_bytes,
+                    Some(RegistryValue::String(name.to_string())),
+                    DecodingStatus::Decoded,
+                ),
+            );
+        }
+
+        let mut view_values = BTreeMap::new();
+
+        view_values.insert(
+            "Mode".to_string(),
+            (
+                4,
+                42u32.to_le_bytes().to_vec(),
+                Some(RegistryValue::Dword(42)),
+                DecodingStatus::Decoded,
+            ),
+        );
+
+        if include_col_info {
+            let bytes = vec![1u8; 8];
+
+            view_values.insert(
+                "ColInfo".to_string(),
+                (
+                    3,
+                    bytes.clone(),
+                    Some(RegistryValue::Binary(bytes)),
+                    DecodingStatus::Decoded,
+                ),
+            );
+        }
+
+        values.insert(view_path, view_values);
+
+        FakeReader::with_values(data, values)
     }
 
     fn inspect_test_tree(
@@ -2094,5 +2262,184 @@ mod depth_tests {
             .filter(|e| e.operation == "value_size_limit")
             .count();
         assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn folder_type_value_size_exact_limit() {
+        let reader = build_folder_types_fixture(None, false);
+
+        let mut snapshot = InspectionSnapshot::default();
+
+        inspect_folder_types_hive(
+            &reader,
+            RootKey::Hkcu,
+            TEST_FOLDER_TYPES,
+            ObservationSource::HkcuFolderTypes,
+            &mut snapshot.hkcu_folder_types,
+            4,
+        );
+
+        finalize_inspection_status(&mut snapshot);
+
+        let folder = snapshot
+            .hkcu_folder_types
+            .types
+            .get(TEST_FOLDER_GUID)
+            .expect("folder type missing");
+
+        let view = folder.top_views.get(TEST_VIEW_GUID).expect("view missing");
+
+        assert_eq!(view.mode, Some(42));
+
+        match view.raw_values.get("Mode") {
+            Some(ValueReadResult::Success(raw)) => {
+                assert_eq!(raw.raw_bytes, vec![42, 0, 0, 0]);
+                assert_eq!(raw.decoded.as_ref(), Some(&RegistryValue::Dword(42)));
+            }
+            _ => panic!("expected successful Mode observation"),
+        }
+
+        assert!(!snapshot_has_value_size_limit(&snapshot));
+    }
+
+    #[test]
+    fn folder_type_oversized_view_value_is_omitted() {
+        let reader = build_folder_types_fixture(None, true);
+
+        let mut snapshot = InspectionSnapshot::default();
+
+        inspect_folder_types_hive(
+            &reader,
+            RootKey::Hkcu,
+            TEST_FOLDER_TYPES,
+            ObservationSource::HkcuFolderTypes,
+            &mut snapshot.hkcu_folder_types,
+            4,
+        );
+
+        finalize_inspection_status(&mut snapshot);
+
+        let folder = snapshot
+            .hkcu_folder_types
+            .types
+            .get(TEST_FOLDER_GUID)
+            .expect("folder type missing");
+
+        let view = folder.top_views.get(TEST_VIEW_GUID).expect("view missing");
+
+        assert_eq!(view.mode, Some(42));
+        assert!(!view.raw_values.contains_key("ColInfo"));
+        assert_eq!(view.col_info, None);
+
+        let errs: Vec<_> = snapshot
+            .hkcu_folder_types
+            .read_errors
+            .iter()
+            .filter(|e| e.operation == "value_size_limit")
+            .collect();
+        assert_eq!(errs.len(), 1);
+        let err = &errs[0];
+        assert_eq!(
+            err.key_path,
+            format!(
+                r"{}\{}\TopViews\{}",
+                TEST_FOLDER_TYPES, TEST_FOLDER_GUID, TEST_VIEW_GUID
+            )
+        );
+        assert!(err.error.contains("ColInfo"));
+
+        assert!(matches!(snapshot.status, InspectionStatus::Partial { .. }));
+    }
+
+    #[test]
+    fn folder_type_oversized_canonical_name_is_omitted() {
+        let reader = build_folder_types_fixture(Some("GeneralItems"), false);
+
+        let mut snapshot = InspectionSnapshot::default();
+
+        inspect_folder_types_hive(
+            &reader,
+            RootKey::Hkcu,
+            TEST_FOLDER_TYPES,
+            ObservationSource::HkcuFolderTypes,
+            &mut snapshot.hkcu_folder_types,
+            4,
+        );
+
+        finalize_inspection_status(&mut snapshot);
+
+        let folder = snapshot
+            .hkcu_folder_types
+            .types
+            .get(TEST_FOLDER_GUID)
+            .expect("folder type missing");
+
+        assert_eq!(folder.canonical_name, None);
+        assert!(snapshot
+            .hkcu_folder_types
+            .types
+            .contains_key(TEST_FOLDER_GUID));
+
+        let view = folder.top_views.get(TEST_VIEW_GUID).expect("view missing");
+        assert_eq!(view.mode, Some(42));
+
+        let errs: Vec<_> = snapshot
+            .hkcu_folder_types
+            .read_errors
+            .iter()
+            .filter(|e| e.operation == "value_size_limit")
+            .collect();
+        assert_eq!(errs.len(), 1);
+        let err = &errs[0];
+        assert_eq!(
+            err.key_path,
+            format!(r"{}\{}", TEST_FOLDER_TYPES, TEST_FOLDER_GUID)
+        );
+        assert!(err.error.contains("CanonicalName"));
+
+        assert!(matches!(snapshot.status, InspectionStatus::Partial { .. }));
+    }
+
+    #[test]
+    fn folder_type_size_limit_produces_partial_status() {
+        let reader = build_folder_types_fixture(None, true);
+
+        let mut snapshot = InspectionSnapshot::default();
+
+        inspect_folder_types_hive(
+            &reader,
+            RootKey::Hklm,
+            TEST_FOLDER_TYPES,
+            ObservationSource::HklmFolderTypes,
+            &mut snapshot.hklm_folder_types,
+            4,
+        );
+
+        finalize_inspection_status(&mut snapshot);
+
+        let folder = snapshot
+            .hklm_folder_types
+            .types
+            .get(TEST_FOLDER_GUID)
+            .expect("folder type missing");
+
+        let view = folder.top_views.get(TEST_VIEW_GUID).expect("view missing");
+
+        assert!(!view.raw_values.contains_key("ColInfo"));
+        assert_eq!(view.col_info, None);
+        assert_eq!(view.mode, Some(42));
+
+        assert!(snapshot_has_value_size_limit(&snapshot));
+
+        assert!(matches!(snapshot.status, InspectionStatus::Partial { .. }));
+
+        let errs: Vec<_> = snapshot
+            .hklm_folder_types
+            .read_errors
+            .iter()
+            .filter(|e| e.operation == "value_size_limit")
+            .collect();
+        assert_eq!(errs.len(), 1);
+        assert_eq!(errs[0].root, RootKey::Hklm);
     }
 }
