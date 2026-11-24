@@ -12,21 +12,34 @@ use winview_core::model::{
 use winview_core::registry::keys::{RootKey, ValueTypeName};
 use winview_core::registry::traits::{RegistryError, RegistryKey, RegistryReader, RegistryResult};
 
-fn map_windows_error<E: std::fmt::Display>(e: E, root: RootKey, path: &str) -> RegistryError {
-    let msg = e.to_string();
-    let lower = msg.to_lowercase();
-    if lower.contains("not found") || lower.contains("cannot find") {
-        RegistryError::KeyNotFound {
+fn classify_windows_error(
+    code: u32,
+    root: RootKey,
+    path: &str,
+    value_name: Option<&str>,
+    message: String,
+) -> RegistryError {
+    match code {
+        0x80070002 => match value_name {
+            Some(name) => RegistryError::ValueNotFound {
+                root,
+                path: path.to_string(),
+                name: name.to_string(),
+            },
+            None => RegistryError::KeyNotFound {
+                root,
+                path: path.to_string(),
+            },
+        },
+        0x80070003 => RegistryError::KeyNotFound {
             root,
             path: path.to_string(),
-        }
-    } else if lower.contains("access denied") || lower.contains("permission") {
-        RegistryError::AccessDenied {
+        },
+        0x80070005 => RegistryError::AccessDenied {
             root,
             path: path.to_string(),
-        }
-    } else {
-        RegistryError::WindowsApi(msg)
+        },
+        _ => RegistryError::WindowsApi(message),
     }
 }
 
@@ -100,14 +113,20 @@ pub struct WindowsRegistryReader;
 impl RegistryReader for WindowsRegistryReader {
     fn open_key(&self, root: RootKey, path: &str) -> RegistryResult<Box<dyn RegistryKey>> {
         let key = match root {
-            RootKey::Hkcu => CURRENT_USER
-                .open(path)
-                .map_err(|e| map_windows_error(e, root, path))?,
-            RootKey::Hklm => LOCAL_MACHINE
-                .open(path)
-                .map_err(|e| map_windows_error(e, root, path))?,
+            RootKey::Hkcu => CURRENT_USER.open(path).map_err(|e| {
+                let code = e.code().0 as u32;
+                classify_windows_error(code, root, path, None, e.to_string())
+            })?,
+            RootKey::Hklm => LOCAL_MACHINE.open(path).map_err(|e| {
+                let code = e.code().0 as u32;
+                classify_windows_error(code, root, path, None, e.to_string())
+            })?,
         };
-        Ok(Box::new(WindowsRegistryKey(key)))
+        Ok(Box::new(WindowsRegistryKey {
+            key,
+            root,
+            path: path.to_string(),
+        }))
     }
 
     fn enum_keys(&self, root: RootKey, path: &str) -> RegistryResult<Vec<String>> {
@@ -171,12 +190,16 @@ impl RegistryReader for WindowsRegistryReader {
     }
 }
 
-struct WindowsRegistryKey(Key);
+struct WindowsRegistryKey {
+    key: Key,
+    root: RootKey,
+    path: String,
+}
 
 impl RegistryKey for WindowsRegistryKey {
     fn enum_values(&self) -> RegistryResult<Vec<(String, ValueTypeName)>> {
         let iter = self
-            .0
+            .key
             .values()
             .map_err(|e| RegistryError::WindowsApi(e.to_string()))?;
 
@@ -190,7 +213,7 @@ impl RegistryKey for WindowsRegistryKey {
 
     fn enum_subkeys(&self) -> RegistryResult<Vec<String>> {
         let iter = self
-            .0
+            .key
             .keys()
             .map_err(|e| RegistryError::WindowsApi(e.to_string()))?;
 
@@ -205,10 +228,10 @@ impl RegistryKey for WindowsRegistryKey {
         &self,
         name: &str,
     ) -> RegistryResult<(ValueTypeName, Vec<u8>, RegistryValue, DecodingStatus)> {
-        let value = self
-            .0
-            .get_value(name)
-            .map_err(|e| RegistryError::WindowsApi(e.to_string()))?;
+        let value = self.key.get_value(name).map_err(|e| {
+            let code = e.code().0 as u32;
+            classify_windows_error(code, self.root, &self.path, Some(name), e.to_string())
+        })?;
 
         let (type_name, reg_value, raw_bytes, status) =
             convert_registry_value(value.ty(), value.deref());
@@ -216,20 +239,25 @@ impl RegistryKey for WindowsRegistryKey {
     }
 
     fn get_value_type(&self, name: &str) -> RegistryResult<ValueTypeName> {
-        let vtype = self
-            .0
-            .get_type(name)
-            .map_err(|e| RegistryError::WindowsApi(e.to_string()))?;
+        let vtype = self.key.get_type(name).map_err(|e| {
+            let code = e.code().0 as u32;
+            classify_windows_error(code, self.root, &self.path, Some(name), e.to_string())
+        })?;
 
         Ok(convert_type(vtype))
     }
 
     fn open_subkey(&self, name: &str) -> RegistryResult<Box<dyn RegistryKey>> {
-        let subkey = self
-            .0
-            .open(name)
-            .map_err(|e| RegistryError::WindowsApi(e.to_string()))?;
-        Ok(Box::new(WindowsRegistryKey(subkey)))
+        let child_path = format!(r"{}\{}", self.path, name);
+        let subkey = self.key.open(name).map_err(|e| {
+            let code = e.code().0 as u32;
+            classify_windows_error(code, self.root, &child_path, None, e.to_string())
+        })?;
+        Ok(Box::new(WindowsRegistryKey {
+            key: subkey,
+            root: self.root,
+            path: child_path,
+        }))
     }
 }
 
@@ -3722,5 +3750,133 @@ mod depth_tests {
         assert_eq!(count_snapshot_read_errors(&snapshot), 1);
 
         assert!(!matches!(snapshot.status, InspectionStatus::Complete));
+    }
+
+    #[test]
+    fn windows_missing_key_error_is_classified() {
+        let error = classify_windows_error(
+            0x80070002,
+            RootKey::Hkcu,
+            "Software\\Test",
+            None,
+            "The system cannot find the file specified.".to_string(),
+        );
+
+        assert!(matches!(
+            error,
+            RegistryError::KeyNotFound { root, path }
+                if root == RootKey::Hkcu && path == "Software\\Test"
+        ));
+    }
+
+    #[test]
+    fn windows_missing_value_error_is_classified() {
+        let error = classify_windows_error(
+            0x80070002,
+            RootKey::Hkcu,
+            "Software\\Test",
+            Some("Mode"),
+            "The system cannot find the file specified.".to_string(),
+        );
+
+        assert!(matches!(
+            error,
+            RegistryError::ValueNotFound { root, path, name }
+                if root == RootKey::Hkcu
+                    && path == "Software\\Test"
+                    && name == "Mode"
+        ));
+    }
+
+    #[test]
+    fn windows_missing_path_is_not_missing_value() {
+        let error = classify_windows_error(
+            0x80070003,
+            RootKey::Hkcu,
+            "Software\\Test",
+            Some("Mode"),
+            "The system cannot find the path specified.".to_string(),
+        );
+
+        assert!(matches!(
+            error,
+            RegistryError::KeyNotFound { root, path }
+                if root == RootKey::Hkcu && path == "Software\\Test"
+        ));
+    }
+
+    #[test]
+    fn windows_access_denied_error_is_classified() {
+        let error = classify_windows_error(
+            0x80070005,
+            RootKey::Hklm,
+            "Software\\Policies",
+            None,
+            "Access is denied.".to_string(),
+        );
+
+        assert!(matches!(
+            error,
+            RegistryError::AccessDenied { root, path }
+                if root == RootKey::Hklm && path == "Software\\Policies"
+        ));
+    }
+
+    #[test]
+    fn windows_unknown_error_preserves_diagnostics() {
+        let error = classify_windows_error(
+            0xC0000001,
+            RootKey::Hkcu,
+            "Software\\Test",
+            None,
+            "Custom diagnostic message".to_string(),
+        );
+
+        assert!(matches!(
+            error,
+            RegistryError::WindowsApi(msg)
+                if msg == "Custom diagnostic message"
+        ));
+    }
+
+    #[test]
+    fn windows_error_classification_is_language_independent() {
+        let english = classify_windows_error(
+            0x80070002,
+            RootKey::Hkcu,
+            "Software\\Test",
+            Some("Mode"),
+            "The system cannot find the file specified.".to_string(),
+        );
+        let non_english = classify_windows_error(
+            0x80070002,
+            RootKey::Hkcu,
+            "Software\\Test",
+            Some("Mode"),
+            "Le système ne peut pas trouver le fichier spécifié.".to_string(),
+        );
+
+        assert!(matches!(
+            english,
+            RegistryError::ValueNotFound { name, .. } if name == "Mode"
+        ));
+        assert!(matches!(
+            non_english,
+            RegistryError::ValueNotFound { name, .. } if name == "Mode"
+        ));
+
+        // An unrelated numeric error code containing the English phrase
+        // "not found" must remain WindowsApi, not KeyNotFound.
+        let unrelated = classify_windows_error(
+            0xC0000001,
+            RootKey::Hkcu,
+            "Software\\Test",
+            None,
+            "object name not found".to_string(),
+        );
+        assert!(matches!(
+            unrelated,
+            RegistryError::WindowsApi(msg) if msg == "object name not found"
+        ));
     }
 }
