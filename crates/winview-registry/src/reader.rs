@@ -1125,88 +1125,106 @@ fn inspect_key_tree(
     let mut snapshot = KeySnapshot::default();
 
     // Read values
-    let values_result = key.enum_values();
-    if let Ok(values) = values_result {
-        if values.len() > budget.max_values_per_key {
+    match key.enum_values() {
+        Ok(values) => {
+            if values.len() > budget.max_values_per_key {
+                snapshot.read_errors.push(InspectionError {
+                    key_path: path.to_string(),
+                    root,
+                    operation: "value_count_limit".to_string(),
+                    error: format!(
+                        "Maximum registry values per key ({}) exceeded; \
+                         {} values omitted",
+                        budget.max_values_per_key,
+                        values.len() - budget.max_values_per_key
+                    ),
+                });
+            }
+
+            for (value_name, _type_name) in values.into_iter().take(budget.max_values_per_key) {
+                let value_result = key.get_value(&value_name);
+                let read_result = match value_result {
+                    Ok((tn, raw_bytes, decoded, status)) => {
+                        if let Some(error) = check_value_size(
+                            root,
+                            path,
+                            &value_name,
+                            raw_bytes.len(),
+                            budget.max_value_bytes,
+                        ) {
+                            snapshot.read_errors.push(error);
+                            continue;
+                        }
+
+                        if let Some(error) = check_snapshot_budget(
+                            snapshot_budget,
+                            root,
+                            path,
+                            &value_name,
+                            raw_bytes.len(),
+                        ) {
+                            snapshot.read_errors.push(error);
+                            continue;
+                        }
+
+                        let decoded_opt = match status {
+                            DecodingStatus::Decoded => Some(decoded),
+                            _ => None,
+                        };
+                        ValueReadResult::Success(RawRegistryValue {
+                            key_path: path.to_string(),
+                            value_name: value_name.clone(),
+                            root,
+                            raw_type_id: tn.to_raw_id(),
+                            raw_bytes,
+                            decoded: decoded_opt,
+                            decoding_status: status,
+                            source,
+                        })
+                    }
+                    Err(e) => ValueReadResult::Failure(ReadError::Other(e.to_string())),
+                };
+                snapshot.values.insert(value_name, read_result);
+            }
+        }
+        Err(e) => {
             snapshot.read_errors.push(InspectionError {
                 key_path: path.to_string(),
                 root,
-                operation: "value_count_limit".to_string(),
-                error: format!(
-                    "Maximum registry values per key ({}) exceeded; \
-                     {} values omitted",
-                    budget.max_values_per_key,
-                    values.len() - budget.max_values_per_key
-                ),
+                operation: "enum_values".to_string(),
+                error: e.to_string(),
             });
-        }
-
-        for (value_name, _type_name) in values.into_iter().take(budget.max_values_per_key) {
-            let value_result = key.get_value(&value_name);
-            let read_result = match value_result {
-                Ok((tn, raw_bytes, decoded, status)) => {
-                    if let Some(error) = check_value_size(
-                        root,
-                        path,
-                        &value_name,
-                        raw_bytes.len(),
-                        budget.max_value_bytes,
-                    ) {
-                        snapshot.read_errors.push(error);
-                        continue;
-                    }
-
-                    if let Some(error) = check_snapshot_budget(
-                        snapshot_budget,
-                        root,
-                        path,
-                        &value_name,
-                        raw_bytes.len(),
-                    ) {
-                        snapshot.read_errors.push(error);
-                        continue;
-                    }
-
-                    let decoded_opt = match status {
-                        DecodingStatus::Decoded => Some(decoded),
-                        _ => None,
-                    };
-                    ValueReadResult::Success(RawRegistryValue {
-                        key_path: path.to_string(),
-                        value_name: value_name.clone(),
-                        root,
-                        raw_type_id: tn.to_raw_id(),
-                        raw_bytes,
-                        decoded: decoded_opt,
-                        decoding_status: status,
-                        source,
-                    })
-                }
-                Err(e) => ValueReadResult::Failure(ReadError::Other(e.to_string())),
-            };
-            snapshot.values.insert(value_name, read_result);
         }
     }
 
     // Recursively read subkeys (with depth limit)
-    let subkeys_result = key.enum_subkeys();
-    if let Ok(subkeys) = subkeys_result {
-        for subkey_name in subkeys {
-            let subkey_path = format!(r"{}\{}", path, subkey_name);
-            inspect_key_tree(
-                reader,
-                root,
-                &subkey_path,
-                source,
-                &mut snapshot.subkeys,
-                "",
-                depth + 1,
-                budget,
-                snapshot_budget,
-            );
-            if budget.limit_exceeded {
-                break;
+    match key.enum_subkeys() {
+        Ok(subkeys) => {
+            for subkey_name in subkeys {
+                let subkey_path = format!(r"{}\{}", path, subkey_name);
+                inspect_key_tree(
+                    reader,
+                    root,
+                    &subkey_path,
+                    source,
+                    &mut snapshot.subkeys,
+                    "",
+                    depth + 1,
+                    budget,
+                    snapshot_budget,
+                );
+                if budget.limit_exceeded {
+                    break;
+                }
             }
+        }
+        Err(e) => {
+            snapshot.read_errors.push(InspectionError {
+                key_path: path.to_string(),
+                root,
+                operation: "enum_subkeys".to_string(),
+                error: e.to_string(),
+            });
         }
     }
 
@@ -1402,6 +1420,7 @@ fn finalize_inspection_status(snapshot: &mut InspectionSnapshot) {
 mod depth_tests {
     use super::*;
     use std::collections::BTreeMap;
+    use std::collections::BTreeSet;
     use std::sync::{Arc, Mutex};
     use winview_core::model::{InspectionSnapshot, KeySnapshot, ObservationSource};
 
@@ -1409,10 +1428,17 @@ mod depth_tests {
 
     type FakeValues = BTreeMap<String, BTreeMap<String, FakeValue>>;
 
+    #[derive(Default)]
+    struct EnumFailures {
+        values: BTreeSet<String>,
+        subkeys: BTreeSet<String>,
+    }
+
     struct FakeReader {
         data: Arc<BTreeMap<String, Vec<String>>>,
         opened_keys: Mutex<Vec<(RootKey, String)>>,
         values: Arc<FakeValues>,
+        enum_failures: Arc<EnumFailures>,
     }
 
     impl FakeReader {
@@ -1421,6 +1447,7 @@ mod depth_tests {
                 data: Arc::new(data),
                 opened_keys: Mutex::new(Vec::new()),
                 values: Arc::new(FakeValues::new()),
+                enum_failures: Arc::new(EnumFailures::default()),
             }
         }
 
@@ -1429,7 +1456,17 @@ mod depth_tests {
                 data: Arc::new(data),
                 opened_keys: Mutex::new(Vec::new()),
                 values: Arc::new(values),
+                enum_failures: Arc::new(EnumFailures::default()),
             }
+        }
+
+        fn with_enum_failures(mut self, value_paths: &[&str], subkey_paths: &[&str]) -> Self {
+            self.enum_failures = Arc::new(EnumFailures {
+                values: value_paths.iter().map(|path| path.to_string()).collect(),
+                subkeys: subkey_paths.iter().map(|path| path.to_string()).collect(),
+            });
+
+            self
         }
     }
 
@@ -1437,10 +1474,16 @@ mod depth_tests {
         path: String,
         data: Arc<BTreeMap<String, Vec<String>>>,
         values: Arc<FakeValues>,
+        enum_failures: Arc<EnumFailures>,
     }
 
     impl RegistryKey for FakeKey {
         fn enum_values(&self) -> RegistryResult<Vec<(String, ValueTypeName)>> {
+            if self.enum_failures.values.contains(&self.path) {
+                return Err(RegistryError::WindowsApi(
+                    "injected value enumeration failure".into(),
+                ));
+            }
             if let Some(vals) = self.values.get(&self.path) {
                 Ok(vals
                     .iter()
@@ -1451,6 +1494,11 @@ mod depth_tests {
             }
         }
         fn enum_subkeys(&self) -> RegistryResult<Vec<String>> {
+            if self.enum_failures.subkeys.contains(&self.path) {
+                return Err(RegistryError::WindowsApi(
+                    "injected subkey enumeration failure".into(),
+                ));
+            }
             Ok(self.data.get(&self.path).cloned().unwrap_or_default())
         }
         fn get_value(
@@ -1505,6 +1553,7 @@ mod depth_tests {
                     path: subpath,
                     data: self.data.clone(),
                     values: self.values.clone(),
+                    enum_failures: self.enum_failures.clone(),
                 }))
             } else {
                 Err(RegistryError::KeyNotFound {
@@ -1527,6 +1576,7 @@ mod depth_tests {
                     path: path.to_string(),
                     data: self.data.clone(),
                     values: self.values.clone(),
+                    enum_failures: self.enum_failures.clone(),
                 }))
             } else {
                 Err(RegistryError::KeyNotFound {
@@ -3487,5 +3537,190 @@ mod depth_tests {
         finalize_inspection_status(&mut snapshot);
 
         assert!(matches!(snapshot.status, InspectionStatus::Complete));
+    }
+
+    #[test]
+    fn value_enumeration_failure_preserves_child_traversal() {
+        let reader = build_hierarchy(1).with_enum_failures(&["root"], &[]);
+
+        let (snapshot, _) = inspect_test_tree(&reader, MAX_KEYS_PER_DOMAIN);
+
+        let root = snapshot.bags.get("root").expect("root missing");
+
+        assert!(root.values.is_empty());
+        assert_eq!(root.read_errors.len(), 1);
+
+        let error = &root.read_errors[0];
+
+        assert_eq!(error.operation, "enum_values");
+        assert_eq!(error.root, RootKey::Hkcu);
+        assert_eq!(error.key_path, "root");
+
+        assert!(error.error.contains("injected value enumeration failure"));
+
+        let child = root.subkeys.get(r"root\child").expect("child missing");
+
+        assert!(matches!(
+            child.values.get("TestValue"),
+            Some(ValueReadResult::Success(_))
+        ));
+
+        assert_eq!(count_snapshot_read_errors(&snapshot), 1);
+
+        assert!(matches!(snapshot.status, InspectionStatus::Partial { .. }));
+    }
+
+    #[test]
+    fn subkey_enumeration_failure_preserves_values() {
+        let reader = build_hierarchy(1).with_enum_failures(&[], &["root"]);
+
+        let (snapshot, _) = inspect_test_tree(&reader, MAX_KEYS_PER_DOMAIN);
+
+        let root = snapshot.bags.get("root").expect("root missing");
+
+        let value = root.values.get("TestValue").expect("TestValue missing");
+        match value {
+            ValueReadResult::Success(r) => {
+                assert_eq!(r.raw_bytes, vec![42u8, 0, 0, 0]);
+                assert!(matches!(r.decoded.as_ref(), Some(RegistryValue::Dword(42))));
+            }
+            _ => panic!("expected successful value read"),
+        }
+
+        assert!(root.subkeys.is_empty());
+
+        assert_eq!(root.read_errors.len(), 1);
+
+        let error = &root.read_errors[0];
+
+        assert_eq!(error.operation, "enum_subkeys");
+        assert_eq!(error.root, RootKey::Hkcu);
+        assert_eq!(error.key_path, "root");
+
+        assert!(error.error.contains("injected subkey enumeration failure"));
+
+        let opened = reader.opened_keys.lock().unwrap();
+        assert_eq!(opened.len(), 1);
+        assert_eq!(opened[0], (RootKey::Hkcu, "root".to_string()));
+
+        assert_eq!(count_snapshot_read_errors(&snapshot), 1);
+
+        assert!(matches!(snapshot.status, InspectionStatus::Partial { .. }));
+    }
+
+    #[test]
+    fn nested_enumeration_failure_produces_partial_status() {
+        let reader = build_hierarchy(2).with_enum_failures(&[r"root\child"], &[]);
+
+        let (snapshot, _) = inspect_test_tree(&reader, MAX_KEYS_PER_DOMAIN);
+
+        let root = snapshot.bags.get("root").expect("root missing");
+
+        assert!(matches!(
+            root.values.get("TestValue"),
+            Some(ValueReadResult::Success(_))
+        ));
+
+        let child = root.subkeys.get(r"root\child").expect("child missing");
+
+        assert_eq!(child.read_errors.len(), 1);
+
+        let error = &child.read_errors[0];
+
+        assert_eq!(error.operation, "enum_values");
+        assert_eq!(error.root, RootKey::Hkcu);
+        assert_eq!(error.key_path, r"root\child");
+
+        assert!(error.error.contains("injected value enumeration failure"));
+
+        let grandchild = root
+            .subkeys
+            .get(r"root\child")
+            .and_then(|k| k.subkeys.get(r"root\child\child"))
+            .expect("grandchild missing");
+
+        assert!(matches!(
+            grandchild.values.get("TestValue"),
+            Some(ValueReadResult::Success(_))
+        ));
+
+        assert_eq!(count_snapshot_read_errors(&snapshot), 1);
+
+        assert!(matches!(snapshot.status, InspectionStatus::Partial { .. }));
+    }
+
+    #[test]
+    fn both_enumeration_failures_are_recorded() {
+        let reader = build_hierarchy(0).with_enum_failures(&["root"], &["root"]);
+
+        let (snapshot, _) = inspect_test_tree(&reader, MAX_KEYS_PER_DOMAIN);
+
+        let root = snapshot.bags.get("root").expect("root missing");
+
+        assert!(root.values.is_empty());
+
+        assert_eq!(root.read_errors.len(), 2);
+
+        let enum_values_err = root
+            .read_errors
+            .iter()
+            .find(|e| e.operation == "enum_values")
+            .expect("enum_values error missing");
+        assert_eq!(enum_values_err.root, RootKey::Hkcu);
+        assert_eq!(enum_values_err.key_path, "root");
+        assert!(enum_values_err
+            .error
+            .contains("injected value enumeration failure"));
+
+        let enum_subkeys_err = root
+            .read_errors
+            .iter()
+            .find(|e| e.operation == "enum_subkeys")
+            .expect("enum_subkeys error missing");
+        assert_eq!(enum_subkeys_err.root, RootKey::Hkcu);
+        assert_eq!(enum_subkeys_err.key_path, "root");
+        assert!(enum_subkeys_err
+            .error
+            .contains("injected subkey enumeration failure"));
+
+        assert_eq!(count_snapshot_read_errors(&snapshot), 2);
+
+        assert!(!matches!(snapshot.status, InspectionStatus::Complete));
+    }
+
+    #[test]
+    fn folder_types_enumeration_failure_is_reported() {
+        let reader =
+            build_folder_types_fixture(None, false).with_enum_failures(&[], &[TEST_FOLDER_TYPES]);
+
+        let mut snapshot = InspectionSnapshot::default();
+        let mut snapshot_budget = SnapshotBudget::new(MAX_SNAPSHOT_BYTES);
+
+        inspect_folder_types_hive(
+            &reader,
+            RootKey::Hkcu,
+            TEST_FOLDER_TYPES,
+            ObservationSource::HkcuFolderTypes,
+            &mut snapshot.hkcu_folder_types,
+            MAX_VALUE_BYTES,
+            &mut snapshot_budget,
+        );
+
+        finalize_inspection_status(&mut snapshot);
+
+        assert_eq!(snapshot.hkcu_folder_types.read_errors.len(), 1);
+
+        let error = &snapshot.hkcu_folder_types.read_errors[0];
+
+        assert_eq!(error.operation, "enum_subkeys");
+        assert_eq!(error.root, RootKey::Hkcu);
+        assert_eq!(error.key_path, TEST_FOLDER_TYPES);
+        assert!(error.error.contains("injected subkey enumeration failure"));
+
+        assert!(snapshot.hkcu_folder_types.types.is_empty());
+
+        assert_eq!(count_snapshot_read_errors(&snapshot), 1);
+
+        assert!(!matches!(snapshot.status, InspectionStatus::Complete));
     }
 }
