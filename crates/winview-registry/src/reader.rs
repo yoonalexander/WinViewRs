@@ -1078,17 +1078,19 @@ fn finalize_inspection_status(snapshot: &mut InspectionSnapshot) {
 mod depth_tests {
     use super::*;
     use std::collections::BTreeMap;
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex};
     use winview_core::model::{InspectionSnapshot, KeySnapshot, ObservationSource};
 
     struct FakeReader {
         data: Arc<BTreeMap<String, Vec<String>>>,
+        opened_keys: Mutex<Vec<(RootKey, String)>>,
     }
 
     impl FakeReader {
         fn new(data: BTreeMap<String, Vec<String>>) -> Self {
             Self {
                 data: Arc::new(data),
+                opened_keys: Mutex::new(Vec::new()),
             }
         }
     }
@@ -1100,23 +1102,36 @@ mod depth_tests {
 
     impl RegistryKey for FakeKey {
         fn enum_values(&self) -> RegistryResult<Vec<(String, ValueTypeName)>> {
-            Ok(vec![])
+            Ok(vec![("TestValue".to_string(), ValueTypeName::RegDword)])
         }
         fn enum_subkeys(&self) -> RegistryResult<Vec<String>> {
             Ok(self.data.get(&self.path).cloned().unwrap_or_default())
         }
         fn get_value(
             &self,
-            _name: &str,
+            name: &str,
         ) -> RegistryResult<(ValueTypeName, Vec<u8>, RegistryValue, DecodingStatus)> {
-            Err(RegistryError::ValueNotFound {
-                root: RootKey::Hkcu,
-                path: "".into(),
-                name: "".into(),
-            })
+            if name == "TestValue" {
+                Ok((
+                    ValueTypeName::RegDword,
+                    42u32.to_le_bytes().to_vec(),
+                    RegistryValue::Dword(42),
+                    DecodingStatus::Decoded,
+                ))
+            } else {
+                Err(RegistryError::ValueNotFound {
+                    root: RootKey::Hkcu,
+                    path: "".into(),
+                    name: "".into(),
+                })
+            }
         }
-        fn get_value_type(&self, _name: &str) -> RegistryResult<ValueTypeName> {
-            Ok(ValueTypeName::RegSz)
+        fn get_value_type(&self, name: &str) -> RegistryResult<ValueTypeName> {
+            if name == "TestValue" {
+                Ok(ValueTypeName::RegDword)
+            } else {
+                Ok(ValueTypeName::RegSz)
+            }
         }
         fn open_subkey(&self, name: &str) -> RegistryResult<Box<dyn RegistryKey>> {
             let subpath = format!("{}\\{}", self.path, name);
@@ -1135,7 +1150,12 @@ mod depth_tests {
     }
 
     impl RegistryReader for FakeReader {
-        fn open_key(&self, _root: RootKey, path: &str) -> RegistryResult<Box<dyn RegistryKey>> {
+        fn open_key(&self, root: RootKey, path: &str) -> RegistryResult<Box<dyn RegistryKey>> {
+            self.opened_keys
+                .lock()
+                .unwrap()
+                .push((root, path.to_string()));
+
             if self.data.contains_key(path) {
                 Ok(Box::new(FakeKey {
                     path: path.to_string(),
@@ -1196,6 +1216,29 @@ mod depth_tests {
             || ks.subkeys.values().any(has_depth_limit)
     }
 
+    fn inspect_test_tree(
+        reader: &FakeReader,
+        max_keys: usize,
+    ) -> (InspectionSnapshot, TraversalBudget) {
+        let mut snapshot = InspectionSnapshot::default();
+        let mut budget = TraversalBudget::new(max_keys);
+
+        inspect_key_tree(
+            reader,
+            RootKey::Hkcu,
+            "root",
+            ObservationSource::HkcuBags,
+            &mut snapshot.bags,
+            "",
+            0,
+            &mut budget,
+        );
+
+        finalize_inspection_status(&mut snapshot);
+
+        (snapshot, budget)
+    }
+
     #[test]
     fn depth_below_limit_no_error() {
         let reader = build_hierarchy(30);
@@ -1248,6 +1291,13 @@ mod depth_tests {
             &mut budget,
         );
         assert!(target.values().any(has_depth_limit));
+
+        let opened = reader.opened_keys.lock().unwrap();
+        assert_eq!(opened.len(), 32);
+
+        // The depth-32 path must never have been opened.
+        let depth_32_path = (0..=32).fold("root".to_string(), |acc, _| format!("{}\\child", acc));
+        assert!(!opened.iter().any(|(_, p)| p == &depth_32_path));
     }
 
     #[test]
@@ -1295,6 +1345,16 @@ mod depth_tests {
             &mut budget,
         );
         assert!(!target.is_empty());
+
+        let root = target.get("root").expect("root snapshot missing");
+        let value = root.values.get("TestValue").expect("TestValue missing");
+        match value {
+            ValueReadResult::Success(r) => {
+                assert_eq!(r.raw_bytes, vec![42u8, 0, 0, 0]);
+                assert!(matches!(r.decoded.as_ref(), Some(RegistryValue::Dword(42))));
+            }
+            _ => panic!("expected successful value read"),
+        }
     }
 
     #[test]
@@ -1338,5 +1398,219 @@ mod depth_tests {
         budget.record_visit();
         assert!(budget.is_exhausted());
         assert!(!budget.limit_exceeded);
+    }
+
+    #[test]
+    fn key_count_exceeded_blocks_extra_key() {
+        let reader = build_hierarchy(3);
+        let (snapshot, budget) = inspect_test_tree(&reader, 3);
+
+        let opened = reader.opened_keys.lock().unwrap();
+
+        assert_eq!(
+            opened.as_slice(),
+            &[
+                (RootKey::Hkcu, "root".to_string()),
+                (RootKey::Hkcu, r"root\child".to_string()),
+                (RootKey::Hkcu, r"root\child\child".to_string()),
+            ]
+        );
+
+        assert_eq!(budget.visited_keys, 3);
+        assert!(budget.limit_exceeded);
+        assert!(snapshot_has_key_limit(&snapshot));
+
+        assert!(matches!(snapshot.status, InspectionStatus::Partial { .. }));
+    }
+
+    #[test]
+    fn key_count_below_limit() {
+        let reader = build_hierarchy(2);
+        let (snapshot, budget) = inspect_test_tree(&reader, 4);
+
+        let opened = reader.opened_keys.lock().unwrap();
+
+        assert_eq!(
+            opened.as_slice(),
+            &[
+                (RootKey::Hkcu, "root".to_string()),
+                (RootKey::Hkcu, r"root\child".to_string()),
+                (RootKey::Hkcu, r"root\child\child".to_string()),
+            ]
+        );
+
+        assert_eq!(budget.visited_keys, 3);
+        assert!(!budget.limit_exceeded);
+        assert!(!snapshot_has_key_limit(&snapshot));
+        assert!(matches!(snapshot.status, InspectionStatus::Complete));
+    }
+
+    #[test]
+    fn key_count_exact_limit() {
+        let reader = build_hierarchy(2);
+        let (snapshot, budget) = inspect_test_tree(&reader, 3);
+
+        let opened = reader.opened_keys.lock().unwrap();
+
+        assert_eq!(
+            opened.as_slice(),
+            &[
+                (RootKey::Hkcu, "root".to_string()),
+                (RootKey::Hkcu, r"root\child".to_string()),
+                (RootKey::Hkcu, r"root\child\child".to_string()),
+            ]
+        );
+
+        assert_eq!(budget.visited_keys, 3);
+        assert!(!budget.limit_exceeded);
+        assert!(!snapshot_has_key_limit(&snapshot));
+        assert!(matches!(snapshot.status, InspectionStatus::Complete));
+    }
+
+    #[test]
+    fn key_limit_preserves_values() {
+        let reader = build_hierarchy(3);
+        let (snapshot, _budget) = inspect_test_tree(&reader, 3);
+
+        let root = snapshot.bags.get("root").expect("root missing");
+        let child = root.subkeys.get(r"root\child").expect("child missing");
+        let grandchild = root
+            .subkeys
+            .get(r"root\child")
+            .and_then(|k| k.subkeys.get(r"root\child\child"))
+            .expect("grandchild missing");
+
+        for ks in [root, child, grandchild] {
+            let value = ks.values.get("TestValue").expect("TestValue missing");
+            match value {
+                ValueReadResult::Success(r) => {
+                    assert_eq!(r.raw_bytes, vec![42u8, 0, 0, 0]);
+                    assert!(matches!(r.decoded.as_ref(), Some(RegistryValue::Dword(42))));
+                }
+                _ => panic!("expected successful value read"),
+            }
+        }
+    }
+
+    #[test]
+    fn key_limit_error_has_correct_location() {
+        let reader = build_hierarchy(3);
+        let (snapshot, _budget) = inspect_test_tree(&reader, 3);
+
+        let expected_path = r"root\child\child\child".to_string();
+
+        fn find_key_limit(ks: &KeySnapshot) -> Option<&InspectionError> {
+            ks.read_errors
+                .iter()
+                .find(|e| e.operation == "key_limit")
+                .or_else(|| ks.subkeys.values().find_map(find_key_limit))
+        }
+
+        let err = snapshot
+            .bags
+            .values()
+            .find_map(find_key_limit)
+            .expect("key_limit error not found");
+
+        assert_eq!(err.root, RootKey::Hkcu);
+        assert_eq!(err.key_path, expected_path);
+
+        // Exactly one key_limit error across the whole tree.
+        fn count_key_limit(ks: &KeySnapshot) -> usize {
+            ks.read_errors
+                .iter()
+                .filter(|e| e.operation == "key_limit")
+                .count()
+                + ks.subkeys.values().map(count_key_limit).sum::<usize>()
+        }
+        let count = snapshot.bags.values().map(count_key_limit).sum::<usize>();
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn key_limit_stops_sibling_traversal() {
+        let mut data = BTreeMap::new();
+        let children: Vec<String> = (0..5).map(|i| format!("child{}", i)).collect();
+        data.insert("root".to_string(), children);
+
+        let reader = FakeReader::new(data);
+        let (snapshot, budget) = inspect_test_tree(&reader, 3);
+
+        let opened = reader.opened_keys.lock().unwrap();
+
+        assert_eq!(
+            opened.as_slice(),
+            &[
+                (RootKey::Hkcu, "root".to_string()),
+                (RootKey::Hkcu, r"root\child0".to_string()),
+                (RootKey::Hkcu, r"root\child1".to_string()),
+            ]
+        );
+
+        assert_eq!(budget.visited_keys, 3);
+        assert!(budget.limit_exceeded);
+        assert!(snapshot_has_key_limit(&snapshot));
+
+        // Exactly one key_limit error, recorded on the blocked third child.
+        fn count_key_limit(ks: &KeySnapshot) -> usize {
+            ks.read_errors
+                .iter()
+                .filter(|e| e.operation == "key_limit")
+                .count()
+                + ks.subkeys.values().map(count_key_limit).sum::<usize>()
+        }
+        let count = snapshot.bags.values().map(count_key_limit).sum::<usize>();
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn key_budget_shared_across_roots() {
+        let mut data = BTreeMap::new();
+        data.insert("root1".to_string(), vec!["child".to_string()]);
+        data.insert(r"root1\child".to_string(), vec![]);
+        data.insert("root2".to_string(), vec!["child".to_string()]);
+        data.insert(r"root2\child".to_string(), vec![]);
+
+        let reader = FakeReader::new(data);
+
+        let mut snapshot = InspectionSnapshot::default();
+        let mut budget = TraversalBudget::new(3);
+
+        inspect_key_tree(
+            &reader,
+            RootKey::Hkcu,
+            "root1",
+            ObservationSource::HkcuBags,
+            &mut snapshot.bags,
+            "",
+            0,
+            &mut budget,
+        );
+        inspect_key_tree(
+            &reader,
+            RootKey::Hkcu,
+            "root2",
+            ObservationSource::HkcuBags,
+            &mut snapshot.bags,
+            "",
+            0,
+            &mut budget,
+        );
+
+        let opened = reader.opened_keys.lock().unwrap();
+
+        // Budget of 3: root1, root1\child, root2 — then limit exceeded.
+        assert_eq!(
+            opened.as_slice(),
+            &[
+                (RootKey::Hkcu, "root1".to_string()),
+                (RootKey::Hkcu, r"root1\child".to_string()),
+                (RootKey::Hkcu, "root2".to_string()),
+            ]
+        );
+
+        assert_eq!(budget.visited_keys, 3);
+        assert!(budget.limit_exceeded);
+        assert!(snapshot_has_key_limit(&snapshot));
     }
 }
