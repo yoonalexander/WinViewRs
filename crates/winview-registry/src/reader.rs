@@ -155,11 +155,16 @@ impl RegistryReader for WindowsRegistryReader {
 
         // Inspect each domain, collecting errors
         inspect_folder_types(self, &mut snapshot, &mut snapshot_budget);
-        inspect_bags(self, &mut snapshot);
-        inspect_streams(self, &mut snapshot);
+
+        inspect_bags(self, &mut snapshot, &mut snapshot_budget);
+
+        inspect_streams(self, &mut snapshot, &mut snapshot_budget);
+
         inspect_advanced(self, &mut snapshot, MAX_VALUE_BYTES, &mut snapshot_budget);
-        inspect_clsid(self, &mut snapshot);
-        inspect_policies(self, &mut snapshot);
+
+        inspect_clsid(self, &mut snapshot, &mut snapshot_budget);
+
+        inspect_policies(self, &mut snapshot, &mut snapshot_budget);
 
         // Determine inspection status based on collected errors
         let total_errors = snapshot.errors.len()
@@ -740,7 +745,11 @@ fn inspect_folder_types_hive(
     }
 }
 
-fn inspect_bags(reader: &WindowsRegistryReader, snapshot: &mut InspectionSnapshot) {
+fn inspect_bags(
+    reader: &WindowsRegistryReader,
+    snapshot: &mut InspectionSnapshot,
+    snapshot_budget: &mut SnapshotBudget,
+) {
     use winview_core::registry::keys::paths::{
         ALL_FOLDERS_COMDLG, ALL_FOLDERS_COMDLG_LEGACY, ALL_FOLDERS_SHELL, BAGS, BAG_MRU,
     };
@@ -756,6 +765,7 @@ fn inspect_bags(reader: &WindowsRegistryReader, snapshot: &mut InspectionSnapsho
         "",
         0,
         &mut budget,
+        snapshot_budget,
     );
     inspect_key_tree(
         reader,
@@ -766,6 +776,7 @@ fn inspect_bags(reader: &WindowsRegistryReader, snapshot: &mut InspectionSnapsho
         "",
         0,
         &mut budget,
+        snapshot_budget,
     );
     inspect_key_tree(
         reader,
@@ -776,6 +787,7 @@ fn inspect_bags(reader: &WindowsRegistryReader, snapshot: &mut InspectionSnapsho
         "",
         0,
         &mut budget,
+        snapshot_budget,
     );
     inspect_key_tree(
         reader,
@@ -786,6 +798,7 @@ fn inspect_bags(reader: &WindowsRegistryReader, snapshot: &mut InspectionSnapsho
         "",
         0,
         &mut budget,
+        snapshot_budget,
     );
     inspect_key_tree(
         reader,
@@ -796,10 +809,15 @@ fn inspect_bags(reader: &WindowsRegistryReader, snapshot: &mut InspectionSnapsho
         "",
         0,
         &mut budget,
+        snapshot_budget,
     );
 }
 
-fn inspect_streams(reader: &WindowsRegistryReader, snapshot: &mut InspectionSnapshot) {
+fn inspect_streams(
+    reader: &WindowsRegistryReader,
+    snapshot: &mut InspectionSnapshot,
+    snapshot_budget: &mut SnapshotBudget,
+) {
     use winview_core::registry::keys::paths::{DESKTOP, STREAMS, STREAMS_DEFAULTS};
 
     let mut budget = TraversalBudget::new(MAX_KEYS_PER_DOMAIN);
@@ -813,6 +831,7 @@ fn inspect_streams(reader: &WindowsRegistryReader, snapshot: &mut InspectionSnap
         "",
         0,
         &mut budget,
+        snapshot_budget,
     );
     inspect_key_tree(
         reader,
@@ -823,6 +842,7 @@ fn inspect_streams(reader: &WindowsRegistryReader, snapshot: &mut InspectionSnap
         "",
         0,
         &mut budget,
+        snapshot_budget,
     );
     inspect_key_tree(
         reader,
@@ -833,6 +853,7 @@ fn inspect_streams(reader: &WindowsRegistryReader, snapshot: &mut InspectionSnap
         "",
         0,
         &mut budget,
+        snapshot_budget,
     );
 }
 
@@ -919,7 +940,11 @@ fn inspect_advanced(
     }
 }
 
-fn inspect_clsid(reader: &WindowsRegistryReader, snapshot: &mut InspectionSnapshot) {
+fn inspect_clsid(
+    reader: &WindowsRegistryReader,
+    snapshot: &mut InspectionSnapshot,
+    snapshot_budget: &mut SnapshotBudget,
+) {
     let mut budget = TraversalBudget::new(MAX_KEYS_PER_DOMAIN);
     use winview_core::registry::keys::paths::*;
 
@@ -947,11 +972,16 @@ fn inspect_clsid(reader: &WindowsRegistryReader, snapshot: &mut InspectionSnapsh
             "",
             0,
             &mut budget,
+            snapshot_budget,
         );
     }
 }
 
-fn inspect_policies(reader: &WindowsRegistryReader, snapshot: &mut InspectionSnapshot) {
+fn inspect_policies(
+    reader: &WindowsRegistryReader,
+    snapshot: &mut InspectionSnapshot,
+    snapshot_budget: &mut SnapshotBudget,
+) {
     use winview_core::registry::keys::paths::*;
 
     let mut budget = TraversalBudget::new(MAX_KEYS_PER_DOMAIN);
@@ -965,6 +995,7 @@ fn inspect_policies(reader: &WindowsRegistryReader, snapshot: &mut InspectionSna
         "",
         0,
         &mut budget,
+        snapshot_budget,
     );
     inspect_key_tree(
         reader,
@@ -975,6 +1006,7 @@ fn inspect_policies(reader: &WindowsRegistryReader, snapshot: &mut InspectionSna
         "",
         0,
         &mut budget,
+        snapshot_budget,
     );
     inspect_key_tree(
         reader,
@@ -985,6 +1017,7 @@ fn inspect_policies(reader: &WindowsRegistryReader, snapshot: &mut InspectionSna
         "HKLM",
         0,
         &mut budget,
+        snapshot_budget,
     );
     inspect_key_tree(
         reader,
@@ -995,6 +1028,7 @@ fn inspect_policies(reader: &WindowsRegistryReader, snapshot: &mut InspectionSna
         "",
         0,
         &mut budget,
+        snapshot_budget,
     );
 }
 
@@ -1053,6 +1087,7 @@ fn inspect_key_tree(
     key_prefix: &str,
     depth: usize,
     budget: &mut TraversalBudget,
+    snapshot_budget: &mut SnapshotBudget,
 ) {
     let map_key = if key_prefix.is_empty() {
         path.to_string()
@@ -1146,6 +1181,17 @@ fn inspect_key_tree(
                         continue;
                     }
 
+                    if let Some(error) = check_snapshot_budget(
+                        snapshot_budget,
+                        root,
+                        path,
+                        &value_name,
+                        raw_bytes.len(),
+                    ) {
+                        snapshot.read_errors.push(error);
+                        continue;
+                    }
+
                     let decoded_opt = match status {
                         DecodingStatus::Decoded => Some(decoded),
                         _ => None,
@@ -1181,6 +1227,7 @@ fn inspect_key_tree(
                 "",
                 depth + 1,
                 budget,
+                snapshot_budget,
             );
             if budget.limit_exceeded {
                 break;
@@ -1269,12 +1316,15 @@ fn snapshot_has_value_size_limit(snapshot: &InspectionSnapshot) -> bool {
         .any(|map| map.values().any(has_value_size_limit_error))
 }
 
-fn snapshot_has_snapshot_size_limit(snapshot: &InspectionSnapshot) -> bool {
-    snapshot
-        .advanced
-        .read_errors
+fn has_snapshot_size_limit_error(key: &KeySnapshot) -> bool {
+    key.read_errors
         .iter()
         .any(|e| e.operation == "snapshot_size_limit")
+        || key.subkeys.values().any(has_snapshot_size_limit_error)
+}
+
+fn snapshot_has_snapshot_size_limit(snapshot: &InspectionSnapshot) -> bool {
+    has_snapshot_size_limit_error(&snapshot.advanced)
         || snapshot
             .hkcu_folder_types
             .read_errors
@@ -1285,6 +1335,14 @@ fn snapshot_has_snapshot_size_limit(snapshot: &InspectionSnapshot) -> bool {
             .read_errors
             .iter()
             .any(|e| e.operation == "snapshot_size_limit")
+        || [
+            &snapshot.bags,
+            &snapshot.streams,
+            &snapshot.clsid,
+            &snapshot.policies,
+        ]
+        .iter()
+        .any(|map| map.values().any(has_snapshot_size_limit_error))
 }
 
 fn finalize_inspection_status(snapshot: &mut InspectionSnapshot) {
@@ -1625,6 +1683,7 @@ mod depth_tests {
     ) -> (InspectionSnapshot, TraversalBudget) {
         let mut snapshot = InspectionSnapshot::default();
         let mut budget = TraversalBudget::new(max_keys);
+        let mut snapshot_budget = SnapshotBudget::new(MAX_SNAPSHOT_BYTES);
 
         inspect_key_tree(
             reader,
@@ -1635,6 +1694,7 @@ mod depth_tests {
             "",
             0,
             &mut budget,
+            &mut snapshot_budget,
         );
 
         finalize_inspection_status(&mut snapshot);
@@ -1647,6 +1707,7 @@ mod depth_tests {
         let reader = build_hierarchy(30);
         let mut target = BTreeMap::new();
         let mut budget = TraversalBudget::new(MAX_KEYS_PER_DOMAIN);
+        let mut snapshot_budget = SnapshotBudget::new(MAX_SNAPSHOT_BYTES);
         inspect_key_tree(
             &reader,
             RootKey::Hkcu,
@@ -1656,6 +1717,7 @@ mod depth_tests {
             "",
             0,
             &mut budget,
+            &mut snapshot_budget,
         );
         assert!(target.values().all(|ks| !has_depth_limit(ks)));
     }
@@ -1665,6 +1727,7 @@ mod depth_tests {
         let reader = build_hierarchy(31);
         let mut target = BTreeMap::new();
         let mut budget = TraversalBudget::new(MAX_KEYS_PER_DOMAIN);
+        let mut snapshot_budget = SnapshotBudget::new(MAX_SNAPSHOT_BYTES);
         inspect_key_tree(
             &reader,
             RootKey::Hkcu,
@@ -1674,6 +1737,7 @@ mod depth_tests {
             "",
             0,
             &mut budget,
+            &mut snapshot_budget,
         );
         assert!(target.values().all(|ks| !has_depth_limit(ks)));
     }
@@ -1683,6 +1747,7 @@ mod depth_tests {
         let reader = build_hierarchy(32);
         let mut target = BTreeMap::new();
         let mut budget = TraversalBudget::new(MAX_KEYS_PER_DOMAIN);
+        let mut snapshot_budget = SnapshotBudget::new(MAX_SNAPSHOT_BYTES);
         inspect_key_tree(
             &reader,
             RootKey::Hkcu,
@@ -1692,6 +1757,7 @@ mod depth_tests {
             "",
             0,
             &mut budget,
+            &mut snapshot_budget,
         );
         assert!(target.values().any(has_depth_limit));
 
@@ -1709,6 +1775,7 @@ mod depth_tests {
         let reader = build_hierarchy(32);
         let mut target = BTreeMap::new();
         let mut budget = TraversalBudget::new(MAX_KEYS_PER_DOMAIN);
+        let mut snapshot_budget = SnapshotBudget::new(MAX_SNAPSHOT_BYTES);
         inspect_key_tree(
             &reader,
             RootKey::Hkcu,
@@ -1718,6 +1785,7 @@ mod depth_tests {
             "",
             0,
             &mut budget,
+            &mut snapshot_budget,
         );
         fn find_err(ks: &KeySnapshot) -> Option<&InspectionError> {
             ks.read_errors
@@ -1738,6 +1806,7 @@ mod depth_tests {
         let reader = build_hierarchy(32);
         let mut target = BTreeMap::new();
         let mut budget = TraversalBudget::new(MAX_KEYS_PER_DOMAIN);
+        let mut snapshot_budget = SnapshotBudget::new(MAX_SNAPSHOT_BYTES);
         inspect_key_tree(
             &reader,
             RootKey::Hkcu,
@@ -1747,6 +1816,7 @@ mod depth_tests {
             "",
             0,
             &mut budget,
+            &mut snapshot_budget,
         );
         assert!(!target.is_empty());
 
@@ -1982,6 +2052,7 @@ mod depth_tests {
 
         let mut snapshot = InspectionSnapshot::default();
         let mut budget = TraversalBudget::new(3);
+        let mut snapshot_budget = SnapshotBudget::new(MAX_SNAPSHOT_BYTES);
 
         inspect_key_tree(
             &reader,
@@ -1992,6 +2063,7 @@ mod depth_tests {
             "",
             0,
             &mut budget,
+            &mut snapshot_budget,
         );
         inspect_key_tree(
             &reader,
@@ -2002,6 +2074,7 @@ mod depth_tests {
             "",
             0,
             &mut budget,
+            &mut snapshot_budget,
         );
 
         let opened = reader.opened_keys.lock().unwrap();
@@ -2028,6 +2101,7 @@ mod depth_tests {
         budget.max_values_per_key = 2;
 
         let mut snapshot = InspectionSnapshot::default();
+        let mut snapshot_budget = SnapshotBudget::new(MAX_SNAPSHOT_BYTES);
         inspect_key_tree(
             &reader,
             RootKey::Hkcu,
@@ -2037,6 +2111,7 @@ mod depth_tests {
             "",
             0,
             &mut budget,
+            &mut snapshot_budget,
         );
 
         let root = snapshot.bags.get("root").expect("root missing");
@@ -2052,6 +2127,7 @@ mod depth_tests {
         budget.max_values_per_key = 1;
 
         let mut snapshot = InspectionSnapshot::default();
+        let mut snapshot_budget = SnapshotBudget::new(MAX_SNAPSHOT_BYTES);
         inspect_key_tree(
             &reader,
             RootKey::Hkcu,
@@ -2061,6 +2137,7 @@ mod depth_tests {
             "",
             0,
             &mut budget,
+            &mut snapshot_budget,
         );
         finalize_inspection_status(&mut snapshot);
 
@@ -2078,6 +2155,7 @@ mod depth_tests {
         budget.max_values_per_key = 0;
 
         let mut snapshot = InspectionSnapshot::default();
+        let mut snapshot_budget = SnapshotBudget::new(MAX_SNAPSHOT_BYTES);
         inspect_key_tree(
             &reader,
             RootKey::Hkcu,
@@ -2087,6 +2165,7 @@ mod depth_tests {
             "",
             0,
             &mut budget,
+            &mut snapshot_budget,
         );
         finalize_inspection_status(&mut snapshot);
 
@@ -2104,6 +2183,7 @@ mod depth_tests {
         budget.max_values_per_key = 0;
 
         let mut snapshot = InspectionSnapshot::default();
+        let mut snapshot_budget = SnapshotBudget::new(MAX_SNAPSHOT_BYTES);
         inspect_key_tree(
             &reader,
             RootKey::Hkcu,
@@ -2113,6 +2193,7 @@ mod depth_tests {
             "",
             0,
             &mut budget,
+            &mut snapshot_budget,
         );
 
         let root = snapshot.bags.get("root").expect("root missing");
@@ -2130,6 +2211,7 @@ mod depth_tests {
         budget.max_value_bytes = 3;
 
         let mut snapshot = InspectionSnapshot::default();
+        let mut snapshot_budget = SnapshotBudget::new(MAX_SNAPSHOT_BYTES);
 
         inspect_key_tree(
             &reader,
@@ -2140,6 +2222,7 @@ mod depth_tests {
             "",
             0,
             &mut budget,
+            &mut snapshot_budget,
         );
 
         finalize_inspection_status(&mut snapshot);
@@ -2170,6 +2253,7 @@ mod depth_tests {
         budget.max_value_bytes = 5;
 
         let mut snapshot = InspectionSnapshot::default();
+        let mut snapshot_budget = SnapshotBudget::new(MAX_SNAPSHOT_BYTES);
 
         inspect_key_tree(
             &reader,
@@ -2180,6 +2264,7 @@ mod depth_tests {
             "",
             0,
             &mut budget,
+            &mut snapshot_budget,
         );
 
         finalize_inspection_status(&mut snapshot);
@@ -2207,6 +2292,7 @@ mod depth_tests {
         budget.max_value_bytes = 4;
 
         let mut snapshot = InspectionSnapshot::default();
+        let mut snapshot_budget = SnapshotBudget::new(MAX_SNAPSHOT_BYTES);
 
         inspect_key_tree(
             &reader,
@@ -2217,6 +2303,7 @@ mod depth_tests {
             "",
             0,
             &mut budget,
+            &mut snapshot_budget,
         );
 
         finalize_inspection_status(&mut snapshot);
@@ -2235,6 +2322,7 @@ mod depth_tests {
         budget.max_value_bytes = 3;
 
         let mut snapshot = InspectionSnapshot::default();
+        let mut snapshot_budget = SnapshotBudget::new(MAX_SNAPSHOT_BYTES);
 
         inspect_key_tree(
             &reader,
@@ -2245,6 +2333,7 @@ mod depth_tests {
             "",
             0,
             &mut budget,
+            &mut snapshot_budget,
         );
 
         let root = snapshot.bags.get("root").expect("root missing");
@@ -2865,6 +2954,316 @@ mod depth_tests {
             .collect();
         assert_eq!(errs.len(), 1);
         assert_eq!(errs[0].root, RootKey::Hklm);
+
+        assert!(matches!(snapshot.status, InspectionStatus::Partial { .. }));
+    }
+
+    #[test]
+    fn recursive_snapshot_budget_exact_capacity() {
+        let reader = build_hierarchy(1);
+        let mut budget = TraversalBudget::new(MAX_KEYS_PER_DOMAIN);
+        let mut snapshot_budget = SnapshotBudget::new(8);
+
+        let mut snapshot = InspectionSnapshot::default();
+        inspect_key_tree(
+            &reader,
+            RootKey::Hkcu,
+            "root",
+            ObservationSource::HkcuBags,
+            &mut snapshot.bags,
+            "",
+            0,
+            &mut budget,
+            &mut snapshot_budget,
+        );
+        finalize_inspection_status(&mut snapshot);
+
+        let root = snapshot.bags.get("root").expect("root missing");
+        let child = root.subkeys.get(r"root\child").expect("child missing");
+
+        for ks in [root, child] {
+            let value = ks.values.get("TestValue").expect("TestValue missing");
+            match value {
+                ValueReadResult::Success(r) => {
+                    assert_eq!(r.raw_bytes, vec![42u8, 0, 0, 0]);
+                    assert!(matches!(r.decoded.as_ref(), Some(RegistryValue::Dword(42))));
+                }
+                _ => panic!("expected successful value read"),
+            }
+        }
+
+        assert_eq!(snapshot_budget.captured_bytes, 8);
+
+        let errs: Vec<_> = snapshot
+            .bags
+            .values()
+            .flat_map(|ks| {
+                ks.read_errors
+                    .iter()
+                    .filter(|e| e.operation == "snapshot_size_limit")
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        assert_eq!(errs.len(), 0);
+
+        assert!(matches!(snapshot.status, InspectionStatus::Complete));
+    }
+
+    #[test]
+    fn recursive_snapshot_budget_omits_excess_value() {
+        let reader = build_hierarchy(2);
+        let mut budget = TraversalBudget::new(MAX_KEYS_PER_DOMAIN);
+        let mut snapshot_budget = SnapshotBudget::new(8);
+
+        let mut snapshot = InspectionSnapshot::default();
+        inspect_key_tree(
+            &reader,
+            RootKey::Hkcu,
+            "root",
+            ObservationSource::HkcuBags,
+            &mut snapshot.bags,
+            "",
+            0,
+            &mut budget,
+            &mut snapshot_budget,
+        );
+        finalize_inspection_status(&mut snapshot);
+
+        let root = snapshot.bags.get("root").expect("root missing");
+        let child = root.subkeys.get(r"root\child").expect("child missing");
+        let grandchild = root
+            .subkeys
+            .get(r"root\child")
+            .and_then(|k| k.subkeys.get(r"root\child\child"))
+            .expect("grandchild missing");
+
+        for ks in [root, child] {
+            let value = ks.values.get("TestValue").expect("TestValue missing");
+            match value {
+                ValueReadResult::Success(r) => {
+                    assert_eq!(r.raw_bytes, vec![42u8, 0, 0, 0]);
+                    assert!(matches!(r.decoded.as_ref(), Some(RegistryValue::Dword(42))));
+                }
+                _ => panic!("expected successful value read"),
+            }
+        }
+
+        assert!(!grandchild.values.contains_key("TestValue"));
+
+        let errs: Vec<_> = grandchild
+            .read_errors
+            .iter()
+            .filter(|e| e.operation == "snapshot_size_limit")
+            .collect();
+        assert_eq!(errs.len(), 1);
+        assert_eq!(errs[0].root, RootKey::Hkcu);
+        assert_eq!(errs[0].key_path, r"root\child\child");
+        assert!(errs[0].error.contains("TestValue"));
+
+        assert_eq!(snapshot_budget.captured_bytes, 8);
+        assert!(!budget.limit_exceeded);
+
+        assert!(matches!(snapshot.status, InspectionStatus::Partial { .. }));
+    }
+
+    #[test]
+    fn recursive_snapshot_budget_rejection_allows_smaller_value() {
+        let mut data = BTreeMap::new();
+        data.insert("root".to_string(), Vec::new());
+
+        let mut values = BTreeMap::new();
+        let mut root_values = BTreeMap::new();
+        root_values.insert(
+            "A_First".to_string(),
+            (
+                4,
+                42u32.to_le_bytes().to_vec(),
+                Some(RegistryValue::Dword(42)),
+                DecodingStatus::Decoded,
+            ),
+        );
+        root_values.insert(
+            "B_Large".to_string(),
+            (
+                11,
+                1u64.to_le_bytes().to_vec(),
+                Some(RegistryValue::Qword(1)),
+                DecodingStatus::Decoded,
+            ),
+        );
+        root_values.insert(
+            "C_Last".to_string(),
+            (
+                4,
+                42u32.to_le_bytes().to_vec(),
+                Some(RegistryValue::Dword(42)),
+                DecodingStatus::Decoded,
+            ),
+        );
+        values.insert("root".to_string(), root_values);
+
+        let reader = FakeReader::with_values(data, values);
+        let mut budget = TraversalBudget::new(MAX_KEYS_PER_DOMAIN);
+        let mut snapshot_budget = SnapshotBudget::new(8);
+
+        let mut snapshot = InspectionSnapshot::default();
+        inspect_key_tree(
+            &reader,
+            RootKey::Hkcu,
+            "root",
+            ObservationSource::HkcuBags,
+            &mut snapshot.bags,
+            "",
+            0,
+            &mut budget,
+            &mut snapshot_budget,
+        );
+        finalize_inspection_status(&mut snapshot);
+
+        let root = snapshot.bags.get("root").expect("root missing");
+
+        let first = root.values.get("A_First").expect("A_First missing");
+        match first {
+            ValueReadResult::Success(r) => {
+                assert_eq!(r.raw_bytes, vec![42u8, 0, 0, 0]);
+                assert!(matches!(r.decoded.as_ref(), Some(RegistryValue::Dword(42))));
+            }
+            _ => panic!("expected successful A_First read"),
+        }
+
+        assert!(!root.values.contains_key("B_Large"));
+
+        let last = root.values.get("C_Last").expect("C_Last missing");
+        match last {
+            ValueReadResult::Success(r) => {
+                assert_eq!(r.raw_bytes, vec![42u8, 0, 0, 0]);
+                assert!(matches!(r.decoded.as_ref(), Some(RegistryValue::Dword(42))));
+            }
+            _ => panic!("expected successful C_Last read"),
+        }
+
+        assert_eq!(snapshot_budget.captured_bytes, 8);
+
+        let errs: Vec<_> = root
+            .read_errors
+            .iter()
+            .filter(|e| e.operation == "snapshot_size_limit")
+            .collect();
+        assert_eq!(errs.len(), 1);
+        assert_eq!(errs[0].root, RootKey::Hkcu);
+        assert_eq!(errs[0].key_path, "root");
+        assert!(errs[0].error.contains("B_Large"));
+    }
+
+    #[test]
+    fn snapshot_budget_shared_across_recursive_domains() {
+        let reader = build_hierarchy(0);
+        let mut snapshot = InspectionSnapshot::default();
+        let mut snapshot_budget = SnapshotBudget::new(4);
+
+        let mut budget = TraversalBudget::new(MAX_KEYS_PER_DOMAIN);
+        inspect_key_tree(
+            &reader,
+            RootKey::Hkcu,
+            "root",
+            ObservationSource::HkcuBags,
+            &mut snapshot.bags,
+            "",
+            0,
+            &mut budget,
+            &mut snapshot_budget,
+        );
+
+        let mut budget2 = TraversalBudget::new(MAX_KEYS_PER_DOMAIN);
+        inspect_key_tree(
+            &reader,
+            RootKey::Hkcu,
+            "root",
+            ObservationSource::HkcuStreams,
+            &mut snapshot.streams,
+            "",
+            0,
+            &mut budget2,
+            &mut snapshot_budget,
+        );
+
+        finalize_inspection_status(&mut snapshot);
+
+        let bags_root = snapshot.bags.get("root").expect("bags root missing");
+        assert!(bags_root.values.contains_key("TestValue"));
+
+        let streams_root = snapshot.streams.get("root").expect("streams root missing");
+        assert!(!streams_root.values.contains_key("TestValue"));
+
+        let errs: Vec<_> = streams_root
+            .read_errors
+            .iter()
+            .filter(|e| e.operation == "snapshot_size_limit")
+            .collect();
+        assert_eq!(errs.len(), 1);
+        assert_eq!(errs[0].root, RootKey::Hkcu);
+
+        assert_eq!(snapshot_budget.captured_bytes, 4);
+
+        assert!(matches!(snapshot.status, InspectionStatus::Partial { .. }));
+    }
+
+    #[test]
+    fn snapshot_budget_shared_across_specialized_and_recursive_domains() {
+        let folder_reader = build_folder_types_fixture(None, false);
+
+        let tree_reader = build_hierarchy(0);
+
+        let mut snapshot = InspectionSnapshot::default();
+        let mut snapshot_budget = SnapshotBudget::new(4);
+
+        inspect_folder_types_hive(
+            &folder_reader,
+            RootKey::Hkcu,
+            TEST_FOLDER_TYPES,
+            ObservationSource::HkcuFolderTypes,
+            &mut snapshot.hkcu_folder_types,
+            MAX_VALUE_BYTES,
+            &mut snapshot_budget,
+        );
+
+        let mut budget = TraversalBudget::new(MAX_KEYS_PER_DOMAIN);
+        inspect_key_tree(
+            &tree_reader,
+            RootKey::Hkcu,
+            "root",
+            ObservationSource::HkcuBags,
+            &mut snapshot.bags,
+            "",
+            0,
+            &mut budget,
+            &mut snapshot_budget,
+        );
+
+        finalize_inspection_status(&mut snapshot);
+
+        let folder = snapshot
+            .hkcu_folder_types
+            .types
+            .get(TEST_FOLDER_GUID)
+            .expect("folder type missing");
+        let view = folder.top_views.get(TEST_VIEW_GUID).expect("view missing");
+        assert_eq!(view.mode, Some(42));
+
+        let bags_root = snapshot.bags.get("root").expect("bags root missing");
+        assert!(!bags_root.values.contains_key("TestValue"));
+
+        let errs: Vec<_> = bags_root
+            .read_errors
+            .iter()
+            .filter(|e| e.operation == "snapshot_size_limit")
+            .collect();
+        assert_eq!(errs.len(), 1);
+        assert_eq!(errs[0].root, RootKey::Hkcu);
+        assert_eq!(errs[0].key_path, "root");
+        assert!(errs[0].error.contains("TestValue"));
+
+        assert_eq!(snapshot_budget.captured_bytes, 4);
 
         assert!(matches!(snapshot.status, InspectionStatus::Partial { .. }));
     }
