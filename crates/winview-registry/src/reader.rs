@@ -36,11 +36,14 @@ const MAX_KEYS_PER_DOMAIN: usize = 50_000;
 
 const MAX_VALUES_PER_KEY: usize = 1_000;
 
+const MAX_VALUE_BYTES: usize = 1024 * 1024;
+
 struct TraversalBudget {
     visited_keys: usize,
     max_keys: usize,
     limit_exceeded: bool,
     max_values_per_key: usize,
+    max_value_bytes: usize,
 }
 
 impl TraversalBudget {
@@ -50,6 +53,7 @@ impl TraversalBudget {
             max_keys,
             limit_exceeded: false,
             max_values_per_key: MAX_VALUES_PER_KEY,
+            max_value_bytes: MAX_VALUE_BYTES,
         }
     }
 
@@ -968,6 +972,22 @@ fn inspect_key_tree(
             let value_result = key.get_value(&value_name);
             let read_result = match value_result {
                 Ok((tn, raw_bytes, decoded, status)) => {
+                    if raw_bytes.len() > budget.max_value_bytes {
+                        snapshot.read_errors.push(InspectionError {
+                            key_path: path.to_string(),
+                            root,
+                            operation: "value_size_limit".to_string(),
+                            error: format!(
+                                "Registry value {:?} contains {} bytes, exceeding the {} byte limit",
+                                value_name,
+                                raw_bytes.len(),
+                                budget.max_value_bytes
+                            ),
+                        });
+
+                        continue;
+                    }
+
                     let decoded_opt = match status {
                         DecodingStatus::Decoded => Some(decoded),
                         _ => None,
@@ -1062,6 +1082,24 @@ fn snapshot_has_value_count_limit(snapshot: &InspectionSnapshot) -> bool {
     .any(|map| map.values().any(has_value_count_limit_error))
 }
 
+fn has_value_size_limit_error(key: &KeySnapshot) -> bool {
+    key.read_errors
+        .iter()
+        .any(|e| e.operation == "value_size_limit")
+        || key.subkeys.values().any(has_value_size_limit_error)
+}
+
+fn snapshot_has_value_size_limit(snapshot: &InspectionSnapshot) -> bool {
+    [
+        &snapshot.bags,
+        &snapshot.streams,
+        &snapshot.clsid,
+        &snapshot.policies,
+    ]
+    .iter()
+    .any(|map| map.values().any(has_value_size_limit_error))
+}
+
 fn finalize_inspection_status(snapshot: &mut InspectionSnapshot) {
     let total_errors = snapshot.errors.len()
         + snapshot.hkcu_folder_types.read_errors.len()
@@ -1100,6 +1138,10 @@ fn finalize_inspection_status(snapshot: &mut InspectionSnapshot) {
     } else if snapshot_has_value_count_limit(snapshot) {
         snapshot.status = InspectionStatus::Partial {
             reason: "Maximum registry values per key exceeded".to_string(),
+        };
+    } else if snapshot_has_value_size_limit(snapshot) {
+        snapshot.status = InspectionStatus::Partial {
+            reason: "Maximum individual registry value size exceeded".to_string(),
         };
     } else if total == 0 {
         snapshot.status = InspectionStatus::Complete;
@@ -1757,6 +1799,138 @@ mod depth_tests {
 
         assert!(has_value_count_limit_error(root));
         assert!(has_value_count_limit_error(child));
+        assert!(!budget.limit_exceeded);
+    }
+
+    #[test]
+    fn value_size_above_limit_is_omitted() {
+        let reader = build_hierarchy(0);
+        let mut budget = TraversalBudget::new(MAX_KEYS_PER_DOMAIN);
+        budget.max_value_bytes = 3;
+
+        let mut snapshot = InspectionSnapshot::default();
+
+        inspect_key_tree(
+            &reader,
+            RootKey::Hkcu,
+            "root",
+            ObservationSource::HkcuBags,
+            &mut snapshot.bags,
+            "",
+            0,
+            &mut budget,
+        );
+
+        finalize_inspection_status(&mut snapshot);
+
+        let root = snapshot.bags.get("root").expect("root missing");
+
+        assert!(!root.values.contains_key("TestValue"));
+        assert!(has_value_size_limit_error(root));
+        assert!(!budget.limit_exceeded);
+
+        assert!(matches!(snapshot.status, InspectionStatus::Partial { .. }));
+
+        let err = root
+            .read_errors
+            .iter()
+            .find(|e| e.operation == "value_size_limit")
+            .expect("value size error missing");
+
+        assert_eq!(err.root, RootKey::Hkcu);
+        assert_eq!(err.key_path, "root");
+        assert!(err.error.contains("TestValue"));
+    }
+
+    #[test]
+    fn value_size_below_limit_is_retained() {
+        let reader = build_hierarchy(0);
+        let mut budget = TraversalBudget::new(MAX_KEYS_PER_DOMAIN);
+        budget.max_value_bytes = 5;
+
+        let mut snapshot = InspectionSnapshot::default();
+
+        inspect_key_tree(
+            &reader,
+            RootKey::Hkcu,
+            "root",
+            ObservationSource::HkcuBags,
+            &mut snapshot.bags,
+            "",
+            0,
+            &mut budget,
+        );
+
+        finalize_inspection_status(&mut snapshot);
+
+        let root = snapshot.bags.get("root").expect("root missing");
+        let value = root.values.get("TestValue").expect("TestValue missing");
+
+        match value {
+            ValueReadResult::Success(r) => {
+                assert_eq!(r.raw_bytes, vec![42u8, 0, 0, 0]);
+                assert!(matches!(r.decoded.as_ref(), Some(RegistryValue::Dword(42))));
+            }
+            _ => panic!("expected successful value read"),
+        }
+
+        assert!(!has_value_size_limit_error(root));
+        assert!(!snapshot_has_value_size_limit(&snapshot));
+        assert!(matches!(snapshot.status, InspectionStatus::Complete));
+    }
+
+    #[test]
+    fn value_size_exact_limit_is_retained() {
+        let reader = build_hierarchy(0);
+        let mut budget = TraversalBudget::new(MAX_KEYS_PER_DOMAIN);
+        budget.max_value_bytes = 4;
+
+        let mut snapshot = InspectionSnapshot::default();
+
+        inspect_key_tree(
+            &reader,
+            RootKey::Hkcu,
+            "root",
+            ObservationSource::HkcuBags,
+            &mut snapshot.bags,
+            "",
+            0,
+            &mut budget,
+        );
+
+        finalize_inspection_status(&mut snapshot);
+
+        let root = snapshot.bags.get("root").expect("root missing");
+        assert!(root.values.contains_key("TestValue"));
+        assert!(!has_value_size_limit_error(root));
+        assert!(!snapshot_has_value_size_limit(&snapshot));
+        assert!(matches!(snapshot.status, InspectionStatus::Complete));
+    }
+
+    #[test]
+    fn value_size_limit_does_not_stop_child_traversal() {
+        let reader = build_hierarchy(1);
+        let mut budget = TraversalBudget::new(MAX_KEYS_PER_DOMAIN);
+        budget.max_value_bytes = 3;
+
+        let mut snapshot = InspectionSnapshot::default();
+
+        inspect_key_tree(
+            &reader,
+            RootKey::Hkcu,
+            "root",
+            ObservationSource::HkcuBags,
+            &mut snapshot.bags,
+            "",
+            0,
+            &mut budget,
+        );
+
+        let root = snapshot.bags.get("root").expect("root missing");
+        let child = root.subkeys.get(r"root\child").expect("child missing");
+
+        assert!(has_value_size_limit_error(root));
+        assert!(has_value_size_limit_error(child));
         assert!(!budget.limit_exceeded);
     }
 }
