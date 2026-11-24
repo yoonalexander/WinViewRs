@@ -38,6 +38,35 @@ const MAX_VALUES_PER_KEY: usize = 1_000;
 
 const MAX_VALUE_BYTES: usize = 1024 * 1024;
 
+const MAX_SNAPSHOT_BYTES: usize = 50 * 1024 * 1024;
+
+struct SnapshotBudget {
+    captured_bytes: usize,
+    max_bytes: usize,
+}
+
+impl SnapshotBudget {
+    fn new(max_bytes: usize) -> Self {
+        Self {
+            captured_bytes: 0,
+            max_bytes,
+        }
+    }
+
+    fn try_capture(&mut self, bytes: usize) -> bool {
+        let Some(next) = self.captured_bytes.checked_add(bytes) else {
+            return false;
+        };
+
+        if next > self.max_bytes {
+            return false;
+        }
+
+        self.captured_bytes = next;
+        true
+    }
+}
+
 struct TraversalBudget {
     visited_keys: usize,
     max_keys: usize,
@@ -109,6 +138,9 @@ impl RegistryReader for WindowsRegistryReader {
     fn inspect_all(&self) -> RegistryResult<InspectionSnapshot> {
         let mut snapshot = InspectionSnapshot::default();
 
+        // Shared snapshot-wide capture budget across all inspection domains.
+        let mut snapshot_budget = SnapshotBudget::new(MAX_SNAPSHOT_BYTES);
+
         // Timestamp — populated by adapter (core doesn't need chrono)
         snapshot.metadata.captured_at = time::OffsetDateTime::now_utc()
             .format(&time::format_description::well_known::Rfc3339)
@@ -125,7 +157,7 @@ impl RegistryReader for WindowsRegistryReader {
         inspect_folder_types(self, &mut snapshot);
         inspect_bags(self, &mut snapshot);
         inspect_streams(self, &mut snapshot);
-        inspect_advanced(self, &mut snapshot, MAX_VALUE_BYTES);
+        inspect_advanced(self, &mut snapshot, MAX_VALUE_BYTES, &mut snapshot_budget);
         inspect_clsid(self, &mut snapshot);
         inspect_policies(self, &mut snapshot);
 
@@ -777,6 +809,7 @@ fn inspect_advanced(
     reader: &dyn RegistryReader,
     snapshot: &mut InspectionSnapshot,
     max_value_bytes: usize,
+    snapshot_budget: &mut SnapshotBudget,
 ) {
     use winview_core::registry::keys::advanced_values::*;
     use winview_core::registry::keys::paths::ADVANCED;
@@ -815,6 +848,17 @@ fn inspect_advanced(
                     value_name,
                     raw_bytes.len(),
                     max_value_bytes,
+                ) {
+                    snapshot.advanced.read_errors.push(error);
+                    continue;
+                }
+
+                if let Some(error) = check_snapshot_budget(
+                    snapshot_budget,
+                    RootKey::Hkcu,
+                    ADVANCED,
+                    value_name,
+                    raw_bytes.len(),
                 ) {
                     snapshot.advanced.read_errors.push(error);
                     continue;
@@ -941,6 +985,29 @@ fn check_value_size(
         error: format!(
             "Registry value {:?} contains {} bytes, exceeding the {} byte limit",
             value_name, actual_bytes, max_bytes
+        ),
+    })
+}
+
+fn check_snapshot_budget(
+    budget: &mut SnapshotBudget,
+    root: RootKey,
+    path: &str,
+    value_name: &str,
+    actual_bytes: usize,
+) -> Option<InspectionError> {
+    if budget.try_capture(actual_bytes) {
+        return None;
+    }
+
+    Some(InspectionError {
+        key_path: path.to_string(),
+        root,
+        operation: "snapshot_size_limit".to_string(),
+        error: format!(
+            "Registry value {:?} contains {} bytes; \
+             captured data is already {} of {} bytes",
+            value_name, actual_bytes, budget.captured_bytes, budget.max_bytes
         ),
     })
 }
@@ -1171,6 +1238,14 @@ fn snapshot_has_value_size_limit(snapshot: &InspectionSnapshot) -> bool {
         .any(|map| map.values().any(has_value_size_limit_error))
 }
 
+fn snapshot_has_snapshot_size_limit(snapshot: &InspectionSnapshot) -> bool {
+    snapshot
+        .advanced
+        .read_errors
+        .iter()
+        .any(|e| e.operation == "snapshot_size_limit")
+}
+
 fn finalize_inspection_status(snapshot: &mut InspectionSnapshot) {
     let total_errors = snapshot.errors.len()
         + snapshot.hkcu_folder_types.read_errors.len()
@@ -1213,6 +1288,10 @@ fn finalize_inspection_status(snapshot: &mut InspectionSnapshot) {
     } else if snapshot_has_value_size_limit(snapshot) {
         snapshot.status = InspectionStatus::Partial {
             reason: "Maximum individual registry value size exceeded".to_string(),
+        };
+    } else if snapshot_has_snapshot_size_limit(snapshot) {
+        snapshot.status = InspectionStatus::Partial {
+            reason: "Maximum captured snapshot size exceeded".to_string(),
         };
     } else if total == 0 {
         snapshot.status = InspectionStatus::Complete;
@@ -2152,7 +2231,8 @@ mod depth_tests {
         );
 
         let mut snapshot = InspectionSnapshot::default();
-        inspect_advanced(&reader, &mut snapshot, 4);
+        let mut snapshot_budget = SnapshotBudget::new(MAX_SNAPSHOT_BYTES);
+        inspect_advanced(&reader, &mut snapshot, 4, &mut snapshot_budget);
         finalize_inspection_status(&mut snapshot);
 
         let value = snapshot
@@ -2191,7 +2271,8 @@ mod depth_tests {
         );
 
         let mut snapshot = InspectionSnapshot::default();
-        inspect_advanced(&reader, &mut snapshot, 3);
+        let mut snapshot_budget = SnapshotBudget::new(MAX_SNAPSHOT_BYTES);
+        inspect_advanced(&reader, &mut snapshot, 3, &mut snapshot_budget);
         finalize_inspection_status(&mut snapshot);
 
         assert!(!snapshot.advanced.values.contains_key(HIDE_FILE_EXT));
@@ -2236,7 +2317,8 @@ mod depth_tests {
         );
 
         let mut snapshot = InspectionSnapshot::default();
-        inspect_advanced(&reader, &mut snapshot, 4);
+        let mut snapshot_budget = SnapshotBudget::new(MAX_SNAPSHOT_BYTES);
+        inspect_advanced(&reader, &mut snapshot, 4, &mut snapshot_budget);
         finalize_inspection_status(&mut snapshot);
 
         assert!(!snapshot.advanced.values.contains_key(HIDE_FILE_EXT));
@@ -2441,5 +2523,87 @@ mod depth_tests {
             .collect();
         assert_eq!(errs.len(), 1);
         assert_eq!(errs[0].root, RootKey::Hklm);
+    }
+
+    #[test]
+    fn snapshot_budget_exact_capacity_allowed() {
+        let mut budget = SnapshotBudget::new(8);
+
+        assert!(budget.try_capture(4));
+        assert!(budget.try_capture(4));
+
+        assert_eq!(budget.captured_bytes, 8);
+        assert!(!budget.try_capture(1));
+        assert_eq!(budget.captured_bytes, 8);
+    }
+
+    #[test]
+    fn snapshot_budget_rejected_capture_preserves_capacity() {
+        let mut budget = SnapshotBudget::new(8);
+
+        assert!(budget.try_capture(4));
+        assert!(!budget.try_capture(5));
+        assert_eq!(budget.captured_bytes, 4);
+
+        assert!(budget.try_capture(4));
+        assert_eq!(budget.captured_bytes, 8);
+
+        assert!(!budget.try_capture(usize::MAX));
+        assert_eq!(budget.captured_bytes, 8);
+    }
+
+    #[test]
+    fn advanced_snapshot_budget_limits_combined_values() {
+        use winview_core::registry::keys::advanced_values::{HIDE_FILE_EXT, USE_COMPACT_MODE};
+        use winview_core::registry::keys::paths::ADVANCED;
+        use winview_core::test_support::FakeRegistryReader;
+
+        let reader = FakeRegistryReader::new();
+        reader.insert_value(
+            RootKey::Hkcu,
+            ADVANCED,
+            HIDE_FILE_EXT,
+            4,
+            42u32.to_le_bytes().to_vec(),
+            Some(RegistryValue::Dword(42)),
+        );
+        reader.insert_value(
+            RootKey::Hkcu,
+            ADVANCED,
+            USE_COMPACT_MODE,
+            4,
+            42u32.to_le_bytes().to_vec(),
+            Some(RegistryValue::Dword(42)),
+        );
+
+        let mut snapshot = InspectionSnapshot::default();
+        let mut snapshot_budget = SnapshotBudget::new(4);
+        inspect_advanced(&reader, &mut snapshot, 4, &mut snapshot_budget);
+        finalize_inspection_status(&mut snapshot);
+
+        assert!(snapshot.advanced.values.contains_key(HIDE_FILE_EXT));
+        assert!(!snapshot.advanced.values.contains_key(USE_COMPACT_MODE));
+        assert_eq!(snapshot_budget.captured_bytes, 4);
+
+        let snapshot_errs: Vec<_> = snapshot
+            .advanced
+            .read_errors
+            .iter()
+            .filter(|e| e.operation == "snapshot_size_limit")
+            .collect();
+        assert_eq!(snapshot_errs.len(), 1);
+        assert_eq!(snapshot_errs[0].root, RootKey::Hkcu);
+        assert_eq!(snapshot_errs[0].key_path, ADVANCED);
+        assert!(snapshot_errs[0].error.contains(USE_COMPACT_MODE));
+
+        let value_size_errs: Vec<_> = snapshot
+            .advanced
+            .read_errors
+            .iter()
+            .filter(|e| e.operation == "value_size_limit")
+            .collect();
+        assert_eq!(value_size_errs.len(), 0);
+
+        assert!(matches!(snapshot.status, InspectionStatus::Partial { .. }));
     }
 }
