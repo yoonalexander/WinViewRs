@@ -154,7 +154,7 @@ impl RegistryReader for WindowsRegistryReader {
         snapshot.metadata.detection_method = version_info.detection_method;
 
         // Inspect each domain, collecting errors
-        inspect_folder_types(self, &mut snapshot);
+        inspect_folder_types(self, &mut snapshot, &mut snapshot_budget);
         inspect_bags(self, &mut snapshot);
         inspect_streams(self, &mut snapshot);
         inspect_advanced(self, &mut snapshot, MAX_VALUE_BYTES, &mut snapshot_budget);
@@ -452,7 +452,11 @@ fn decode_reg_multi_sz(data: &[u8]) -> Result<Vec<String>, String> {
 }
 
 // Inspection modules - collect errors instead of failing
-fn inspect_folder_types(reader: &WindowsRegistryReader, snapshot: &mut InspectionSnapshot) {
+fn inspect_folder_types(
+    reader: &WindowsRegistryReader,
+    snapshot: &mut InspectionSnapshot,
+    snapshot_budget: &mut SnapshotBudget,
+) {
     use winview_core::registry::keys::paths::{HKCU_FOLDER_TYPES, HKLM_FOLDER_TYPES};
     inspect_folder_types_hive(
         reader,
@@ -461,6 +465,7 @@ fn inspect_folder_types(reader: &WindowsRegistryReader, snapshot: &mut Inspectio
         ObservationSource::HkcuFolderTypes,
         &mut snapshot.hkcu_folder_types,
         MAX_VALUE_BYTES,
+        snapshot_budget,
     );
 
     // HKLM FolderTypes
@@ -471,6 +476,7 @@ fn inspect_folder_types(reader: &WindowsRegistryReader, snapshot: &mut Inspectio
         ObservationSource::HklmFolderTypes,
         &mut snapshot.hklm_folder_types,
         MAX_VALUE_BYTES,
+        snapshot_budget,
     );
 }
 
@@ -481,6 +487,7 @@ fn inspect_folder_types_hive(
     source: ObservationSource,
     folder_types: &mut FolderTypesSnapshot,
     max_value_bytes: usize,
+    snapshot_budget: &mut SnapshotBudget,
 ) {
     use winview_core::registry::keys::paths::{
         CANONICAL_NAME, COLUMN_LIST, COL_INFO, F_FLAGS, GROUP_ASCENDING, GROUP_BY, ICON_SIZE,
@@ -546,7 +553,20 @@ fn inspect_folder_types_hive(
                     None
                 } else if status == DecodingStatus::Decoded {
                     match decoded {
-                        RegistryValue::String(s) => Some(s),
+                        RegistryValue::String(s) => {
+                            if let Some(error) = check_snapshot_budget(
+                                snapshot_budget,
+                                root,
+                                &guid_path,
+                                CANONICAL_NAME,
+                                raw_bytes.len(),
+                            ) {
+                                folder_types.read_errors.push(error);
+                                None
+                            } else {
+                                Some(s)
+                            }
+                        }
                         _ => None,
                     }
                 } else {
@@ -599,6 +619,17 @@ fn inspect_folder_types_hive(
                         const_name,
                         raw_bytes.len(),
                         max_value_bytes,
+                    ) {
+                        folder_types.read_errors.push(error);
+                        continue;
+                    }
+
+                    if let Some(error) = check_snapshot_budget(
+                        snapshot_budget,
+                        root,
+                        &top_views_path,
+                        const_name,
+                        raw_bytes.len(),
                     ) {
                         folder_types.read_errors.push(error);
                         continue;
@@ -1244,6 +1275,16 @@ fn snapshot_has_snapshot_size_limit(snapshot: &InspectionSnapshot) -> bool {
         .read_errors
         .iter()
         .any(|e| e.operation == "snapshot_size_limit")
+        || snapshot
+            .hkcu_folder_types
+            .read_errors
+            .iter()
+            .any(|e| e.operation == "snapshot_size_limit")
+        || snapshot
+            .hklm_folder_types
+            .read_errors
+            .iter()
+            .any(|e| e.operation == "snapshot_size_limit")
 }
 
 fn finalize_inspection_status(snapshot: &mut InspectionSnapshot) {
@@ -2351,6 +2392,7 @@ mod depth_tests {
         let reader = build_folder_types_fixture(None, false);
 
         let mut snapshot = InspectionSnapshot::default();
+        let mut snapshot_budget = SnapshotBudget::new(MAX_SNAPSHOT_BYTES);
 
         inspect_folder_types_hive(
             &reader,
@@ -2359,6 +2401,7 @@ mod depth_tests {
             ObservationSource::HkcuFolderTypes,
             &mut snapshot.hkcu_folder_types,
             4,
+            &mut snapshot_budget,
         );
 
         finalize_inspection_status(&mut snapshot);
@@ -2389,6 +2432,7 @@ mod depth_tests {
         let reader = build_folder_types_fixture(None, true);
 
         let mut snapshot = InspectionSnapshot::default();
+        let mut snapshot_budget = SnapshotBudget::new(MAX_SNAPSHOT_BYTES);
 
         inspect_folder_types_hive(
             &reader,
@@ -2397,6 +2441,7 @@ mod depth_tests {
             ObservationSource::HkcuFolderTypes,
             &mut snapshot.hkcu_folder_types,
             4,
+            &mut snapshot_budget,
         );
 
         finalize_inspection_status(&mut snapshot);
@@ -2438,6 +2483,7 @@ mod depth_tests {
         let reader = build_folder_types_fixture(Some("GeneralItems"), false);
 
         let mut snapshot = InspectionSnapshot::default();
+        let mut snapshot_budget = SnapshotBudget::new(MAX_SNAPSHOT_BYTES);
 
         inspect_folder_types_hive(
             &reader,
@@ -2446,6 +2492,7 @@ mod depth_tests {
             ObservationSource::HkcuFolderTypes,
             &mut snapshot.hkcu_folder_types,
             4,
+            &mut snapshot_budget,
         );
 
         finalize_inspection_status(&mut snapshot);
@@ -2487,6 +2534,7 @@ mod depth_tests {
         let reader = build_folder_types_fixture(None, true);
 
         let mut snapshot = InspectionSnapshot::default();
+        let mut snapshot_budget = SnapshotBudget::new(MAX_SNAPSHOT_BYTES);
 
         inspect_folder_types_hive(
             &reader,
@@ -2495,6 +2543,7 @@ mod depth_tests {
             ObservationSource::HklmFolderTypes,
             &mut snapshot.hklm_folder_types,
             4,
+            &mut snapshot_budget,
         );
 
         finalize_inspection_status(&mut snapshot);
@@ -2603,6 +2652,219 @@ mod depth_tests {
             .filter(|e| e.operation == "value_size_limit")
             .collect();
         assert_eq!(value_size_errs.len(), 0);
+
+        assert!(matches!(snapshot.status, InspectionStatus::Partial { .. }));
+    }
+
+    #[test]
+    fn folder_type_snapshot_budget_exact_capacity() {
+        let reader = build_folder_types_fixture(None, true);
+
+        let mut snapshot = InspectionSnapshot::default();
+        let mut snapshot_budget = SnapshotBudget::new(12);
+
+        inspect_folder_types_hive(
+            &reader,
+            RootKey::Hkcu,
+            TEST_FOLDER_TYPES,
+            ObservationSource::HkcuFolderTypes,
+            &mut snapshot.hkcu_folder_types,
+            MAX_VALUE_BYTES,
+            &mut snapshot_budget,
+        );
+
+        finalize_inspection_status(&mut snapshot);
+
+        let folder = snapshot
+            .hkcu_folder_types
+            .types
+            .get(TEST_FOLDER_GUID)
+            .expect("folder type missing");
+
+        let view = folder.top_views.get(TEST_VIEW_GUID).expect("view missing");
+
+        assert_eq!(view.mode, Some(42));
+        assert_eq!(view.col_info, Some(vec![1u8; 8]));
+        assert_eq!(snapshot_budget.captured_bytes, 12);
+
+        let errs: Vec<_> = snapshot
+            .hkcu_folder_types
+            .read_errors
+            .iter()
+            .filter(|e| e.operation == "snapshot_size_limit")
+            .collect();
+        assert_eq!(errs.len(), 0);
+
+        assert!(matches!(snapshot.status, InspectionStatus::Complete));
+    }
+
+    #[test]
+    fn folder_type_snapshot_budget_omits_excess_value() {
+        let reader = build_folder_types_fixture(None, true);
+
+        let mut snapshot = InspectionSnapshot::default();
+        let mut snapshot_budget = SnapshotBudget::new(4);
+
+        inspect_folder_types_hive(
+            &reader,
+            RootKey::Hkcu,
+            TEST_FOLDER_TYPES,
+            ObservationSource::HkcuFolderTypes,
+            &mut snapshot.hkcu_folder_types,
+            MAX_VALUE_BYTES,
+            &mut snapshot_budget,
+        );
+
+        finalize_inspection_status(&mut snapshot);
+
+        let folder = snapshot
+            .hkcu_folder_types
+            .types
+            .get(TEST_FOLDER_GUID)
+            .expect("folder type missing");
+
+        let view = folder.top_views.get(TEST_VIEW_GUID).expect("view missing");
+
+        assert_eq!(view.mode, Some(42));
+        assert!(!view.raw_values.contains_key("ColInfo"));
+        assert_eq!(view.col_info, None);
+        assert_eq!(snapshot_budget.captured_bytes, 4);
+
+        let errs: Vec<_> = snapshot
+            .hkcu_folder_types
+            .read_errors
+            .iter()
+            .filter(|e| e.operation == "snapshot_size_limit")
+            .collect();
+        assert_eq!(errs.len(), 1);
+        assert_eq!(errs[0].root, RootKey::Hkcu);
+        assert_eq!(
+            errs[0].key_path,
+            format!(
+                r"{}\{}\TopViews\{}",
+                TEST_FOLDER_TYPES, TEST_FOLDER_GUID, TEST_VIEW_GUID
+            )
+        );
+        assert!(errs[0].error.contains("ColInfo"));
+
+        assert!(matches!(snapshot.status, InspectionStatus::Partial { .. }));
+    }
+
+    #[test]
+    fn canonical_name_consumes_snapshot_budget() {
+        let reader = build_folder_types_fixture(Some("A"), false);
+
+        let mut snapshot = InspectionSnapshot::default();
+        let mut snapshot_budget = SnapshotBudget::new(4);
+
+        inspect_folder_types_hive(
+            &reader,
+            RootKey::Hkcu,
+            TEST_FOLDER_TYPES,
+            ObservationSource::HkcuFolderTypes,
+            &mut snapshot.hkcu_folder_types,
+            MAX_VALUE_BYTES,
+            &mut snapshot_budget,
+        );
+
+        finalize_inspection_status(&mut snapshot);
+
+        let folder = snapshot
+            .hkcu_folder_types
+            .types
+            .get(TEST_FOLDER_GUID)
+            .expect("folder type missing");
+
+        assert_eq!(folder.canonical_name, Some("A".to_string()));
+
+        let view = folder.top_views.get(TEST_VIEW_GUID).expect("view missing");
+
+        assert!(!view.raw_values.contains_key("Mode"));
+        assert_eq!(view.mode, None);
+        assert_eq!(snapshot_budget.captured_bytes, 4);
+
+        let errs: Vec<_> = snapshot
+            .hkcu_folder_types
+            .read_errors
+            .iter()
+            .filter(|e| e.operation == "snapshot_size_limit")
+            .collect();
+        assert_eq!(errs.len(), 1);
+        assert_eq!(errs[0].root, RootKey::Hkcu);
+        assert_eq!(
+            errs[0].key_path,
+            format!(
+                r"{}\{}\TopViews\{}",
+                TEST_FOLDER_TYPES, TEST_FOLDER_GUID, TEST_VIEW_GUID
+            )
+        );
+        assert!(errs[0].error.contains("Mode"));
+
+        assert!(matches!(snapshot.status, InspectionStatus::Partial { .. }));
+    }
+
+    #[test]
+    fn snapshot_budget_shared_across_folder_types_hives() {
+        let reader = build_folder_types_fixture(None, false);
+
+        let mut snapshot = InspectionSnapshot::default();
+        let mut snapshot_budget = SnapshotBudget::new(4);
+
+        inspect_folder_types_hive(
+            &reader,
+            RootKey::Hkcu,
+            TEST_FOLDER_TYPES,
+            ObservationSource::HkcuFolderTypes,
+            &mut snapshot.hkcu_folder_types,
+            MAX_VALUE_BYTES,
+            &mut snapshot_budget,
+        );
+
+        inspect_folder_types_hive(
+            &reader,
+            RootKey::Hklm,
+            TEST_FOLDER_TYPES,
+            ObservationSource::HklmFolderTypes,
+            &mut snapshot.hklm_folder_types,
+            MAX_VALUE_BYTES,
+            &mut snapshot_budget,
+        );
+
+        finalize_inspection_status(&mut snapshot);
+
+        let hkcu_folder = snapshot
+            .hkcu_folder_types
+            .types
+            .get(TEST_FOLDER_GUID)
+            .expect("hkcu folder type missing");
+        let hkcu_view = hkcu_folder
+            .top_views
+            .get(TEST_VIEW_GUID)
+            .expect("hkcu view missing");
+        assert_eq!(hkcu_view.mode, Some(42));
+
+        let hklm_folder = snapshot
+            .hklm_folder_types
+            .types
+            .get(TEST_FOLDER_GUID)
+            .expect("hklm folder type missing");
+        let hklm_view = hklm_folder
+            .top_views
+            .get(TEST_VIEW_GUID)
+            .expect("hklm view missing");
+        assert!(!hklm_view.raw_values.contains_key("Mode"));
+        assert_eq!(hklm_view.mode, None);
+
+        assert_eq!(snapshot_budget.captured_bytes, 4);
+
+        let errs: Vec<_> = snapshot
+            .hklm_folder_types
+            .read_errors
+            .iter()
+            .filter(|e| e.operation == "snapshot_size_limit")
+            .collect();
+        assert_eq!(errs.len(), 1);
+        assert_eq!(errs[0].root, RootKey::Hklm);
 
         assert!(matches!(snapshot.status, InspectionStatus::Partial { .. }));
     }
