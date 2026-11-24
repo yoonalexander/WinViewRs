@@ -37,6 +37,7 @@ const MAX_KEYS_PER_DOMAIN: usize = 50_000;
 struct TraversalBudget {
     visited_keys: usize,
     max_keys: usize,
+    limit_exceeded: bool,
 }
 
 impl TraversalBudget {
@@ -44,6 +45,7 @@ impl TraversalBudget {
         Self {
             visited_keys: 0,
             max_keys,
+            limit_exceeded: false,
         }
     }
 
@@ -51,7 +53,6 @@ impl TraversalBudget {
         self.visited_keys += 1;
     }
 
-    #[allow(dead_code)]
     fn is_exhausted(&self) -> bool {
         self.visited_keys >= self.max_keys
     }
@@ -888,6 +889,10 @@ fn inspect_key_tree(
         format!("{}\\{}", key_prefix, path)
     };
 
+    if budget.limit_exceeded {
+        return;
+    }
+
     if depth >= MAX_DEPTH {
         let mut snapshot = KeySnapshot::default();
         snapshot.read_errors.push(InspectionError {
@@ -896,6 +901,24 @@ fn inspect_key_tree(
             operation: "depth_limit".to_string(),
             error: format!("Maximum recursion depth ({}) exceeded", MAX_DEPTH),
         });
+        target.insert(map_key, snapshot);
+        return;
+    }
+
+    if budget.is_exhausted() {
+        budget.limit_exceeded = true;
+
+        let mut snapshot = KeySnapshot::default();
+        snapshot.read_errors.push(InspectionError {
+            key_path: path.to_string(),
+            root,
+            operation: "key_limit".to_string(),
+            error: format!(
+                "Maximum registry keys per domain ({}) exceeded",
+                budget.max_keys
+            ),
+        });
+
         target.insert(map_key, snapshot);
         return;
     }
@@ -963,6 +986,9 @@ fn inspect_key_tree(
                 depth + 1,
                 budget,
             );
+            if budget.limit_exceeded {
+                break;
+            }
         }
     }
 
@@ -971,6 +997,11 @@ fn inspect_key_tree(
 fn has_depth_limit_error(key: &KeySnapshot) -> bool {
     key.read_errors.iter().any(|e| e.operation == "depth_limit")
         || key.subkeys.values().any(has_depth_limit_error)
+}
+
+fn has_key_limit_error(key: &KeySnapshot) -> bool {
+    key.read_errors.iter().any(|e| e.operation == "key_limit")
+        || key.subkeys.values().any(has_key_limit_error)
 }
 
 fn snapshot_has_depth_limit(snapshot: &InspectionSnapshot) -> bool {
@@ -982,6 +1013,17 @@ fn snapshot_has_depth_limit(snapshot: &InspectionSnapshot) -> bool {
     ]
     .iter()
     .any(|map| map.values().any(has_depth_limit_error))
+}
+
+fn snapshot_has_key_limit(snapshot: &InspectionSnapshot) -> bool {
+    [
+        &snapshot.bags,
+        &snapshot.streams,
+        &snapshot.clsid,
+        &snapshot.policies,
+    ]
+    .iter()
+    .any(|map| map.values().any(has_key_limit_error))
 }
 
 fn finalize_inspection_status(snapshot: &mut InspectionSnapshot) {
@@ -1014,6 +1056,10 @@ fn finalize_inspection_status(snapshot: &mut InspectionSnapshot) {
     if snapshot_has_depth_limit(snapshot) {
         snapshot.status = InspectionStatus::Partial {
             reason: "Maximum recursion depth exceeded".to_string(),
+        };
+    } else if snapshot_has_key_limit(snapshot) {
+        snapshot.status = InspectionStatus::Partial {
+            reason: "Maximum registry key count exceeded".to_string(),
         };
     } else if total == 0 {
         snapshot.status = InspectionStatus::Complete;
@@ -1271,5 +1317,26 @@ mod depth_tests {
         let mut snapshot = InspectionSnapshot::default();
         finalize_inspection_status(&mut snapshot);
         assert!(matches!(snapshot.status, InspectionStatus::Complete));
+    }
+
+    #[test]
+    fn traversal_budget_starts_available() {
+        let budget = TraversalBudget::new(2);
+
+        assert_eq!(budget.visited_keys, 0);
+        assert!(!budget.is_exhausted());
+        assert!(!budget.limit_exceeded);
+    }
+
+    #[test]
+    fn traversal_budget_reaches_capacity() {
+        let mut budget = TraversalBudget::new(2);
+
+        budget.record_visit();
+        assert!(!budget.is_exhausted());
+
+        budget.record_visit();
+        assert!(budget.is_exhausted());
+        assert!(!budget.limit_exceeded);
     }
 }
