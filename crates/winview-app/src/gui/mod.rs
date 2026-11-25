@@ -3,6 +3,8 @@
 #[cfg(feature = "gui")]
 pub mod app;
 #[cfg(feature = "gui")]
+pub mod inspection;
+#[cfg(feature = "gui")]
 pub mod inspector_tab;
 
 #[cfg(feature = "gui")]

@@ -152,10 +152,13 @@ cargo run -p winview-app --features gui -- gui
 
 Current GUI state:
 
-- The window opens and displays the application title and read-only status.
-- Registry inspection is **not yet connected** to the GUI.
-- The CLI remains the functional inspection interface.
-- Phase 1 remains strictly read-only.
+- The window opens in Idle state.
+- Manual inspection and refresh via button click.
+- Background registry inspection runs on a separate thread.
+- The GUI remains responsive during inspection.
+- Complete, Partial, and Failed status are displayed accurately.
+- Recorded inspection error count is shown.
+- Detailed registry browsing is not yet implemented.
 
 ## Known limitations
 
