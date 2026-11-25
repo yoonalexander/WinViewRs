@@ -111,10 +111,18 @@ fn resolve_key<'a>(
     Some(key)
 }
 
+fn root_identity(
+    root_key: &str,
+) -> (&'static str, &str) {
+    match root_key.strip_prefix("HKLM\\") {
+        Some(path) => ("HKLM", path),
+        None => ("HKCU", root_key),
+    }
+}
+
 fn last_component(path: &str) -> &str {
     path.rsplit('\\').next().unwrap_or(path)
 }
-
 fn preview_text(value: &str) -> String {
     let mut chars = value.chars();
     let mut preview: String = chars.by_ref().take(TEXT_PREVIEW_CHARS).collect();
@@ -124,6 +132,44 @@ fn preview_text(value: &str) -> String {
     preview
 }
 
+#[derive(Debug, PartialEq, Eq)]
+struct ValueMetadata {
+    name: String,
+    type_id: String,
+    payload_size: String,
+    status: &'static str,
+}
+
+fn value_metadata(
+    name: &str,
+    observation: &ValueReadResult,
+) -> ValueMetadata {
+    let name = if name.is_empty() {
+        "(Default)".into()
+    } else {
+        preview_text(name)
+    };
+
+    let (type_id, payload_size) =
+        match observation {
+            ValueReadResult::Success(raw) => (
+                raw.raw_type_id.to_string(),
+                format!("{} bytes", raw.raw_bytes.len()),
+            ),
+
+            ValueReadResult::Failure(_) => (
+                "Unavailable".into(),
+                "Unavailable".into(),
+            ),
+        };
+
+    ValueMetadata {
+        name,
+        type_id,
+        payload_size,
+        status: observation_status(observation),
+    }
+}
 fn observation_status(
     observation: &ValueReadResult,
 ) -> &'static str {
@@ -194,7 +240,7 @@ impl RegistryBrowser {
         ui: &mut egui::Ui,
         snapshot: &InspectionSnapshot,
     ) {
-        ui.heading("Registry domains");
+        let _ = root_identity("");
 
         ui.horizontal(|ui| {
             for d in [RegistryDomain::Bags, RegistryDomain::Streams, RegistryDomain::Clsid, RegistryDomain::Policies] {
@@ -259,7 +305,7 @@ impl RegistryBrowser {
 
         if at_roots {
             ui.label(format!("Immediate child records: {}", roots.len()));
-            ui.label(format!("Value records: 0"));
+            ui.label("Value records: 0");
             ui.label(format!("Direct key errors: {}", 0));
         } else if let Some(key) = current_key {
             ui.label(format!("Immediate child records: {}", key.subkeys.len()));
@@ -271,17 +317,19 @@ impl RegistryBrowser {
         let child_source: &BTreeMap<String, KeySnapshot> = if at_roots { roots } else { child_map };
 
         let (child_entries, child_has_next) = page_entries(child_source, self.key_page.after.as_deref());
-        ui.horizontal(|ui| {
-            let on_first = self.key_page.after.is_none() && self.key_page.history.is_empty();
-            if ui.add_enabled(!on_first, egui::Button::new("Previous")).clicked() {
-                self.key_page.previous();
-            }
-            ui.label(format!("Page {}", self.key_page.page_number()));
-            if ui.add_enabled(child_has_next, egui::Button::new("Next")).clicked() {
-                if let Some(last) = child_entries.last() {
-                    self.key_page.next(last.0.as_str());
+ui.push_id("registry_key_pagination", |ui| {
+            ui.horizontal(|ui| {
+                let on_first = self.key_page.after.is_none() && self.key_page.history.is_empty();
+                if ui.add_enabled(!on_first, egui::Button::new("Previous")).clicked() {
+                    self.key_page.previous();
                 }
-            }
+                ui.label(format!("Page {}", self.key_page.page_number()));
+                if ui.add_enabled(child_has_next, egui::Button::new("Next")).clicked() {
+                    if let Some(last) = child_entries.last() {
+                        self.key_page.next(last.0.as_str());
+                    }
+                }
+            });
         });
 
         if child_entries.is_empty() {
@@ -352,24 +400,11 @@ impl RegistryBrowser {
                     ui.label("Status");
                     ui.end_row();
                     for (name, obs) in &val_entries {
-                        let display_name = if name.is_empty() {
-                            "(Default)".to_string()
-                        } else {
-                            preview_text(name)
-                        };
-                        ui.label(display_name);
-                        match obs {
-                            ValueReadResult::Success(raw) => {
-                                ui.label(raw.raw_type_id.to_string());
-                                ui.label(format!("{} bytes", raw.raw_bytes.len()));
-                                ui.label(observation_status(obs));
-                            }
-                            ValueReadResult::Failure(_) => {
-                                ui.label("Unavailable");
-                                ui.label("Unavailable");
-                                ui.label(observation_status(obs));
-                            }
-                        }
+                        let meta = value_metadata(name, obs);
+                        ui.label(meta.name);
+                        ui.label(meta.type_id);
+                        ui.label(meta.payload_size);
+                        ui.label(meta.status);
                         ui.end_row();
                     }
                 });
@@ -388,10 +423,6 @@ mod tests {
 
     use winview_core::model::{InspectionSnapshot, KeySnapshot, RawRegistryValue, ValueReadResult};
 
-    fn make_snapshot() -> InspectionSnapshot {
-        InspectionSnapshot::default()
-    }
-
     #[test]
     fn registry_domains_remain_separate() {
         let mut snap = InspectionSnapshot::default();
@@ -408,6 +439,8 @@ mod tests {
         assert_eq!(RegistryDomain::Streams.roots(&snap).len(), 1);
         assert_eq!(RegistryDomain::Clsid.roots(&snap).len(), 1);
         assert_eq!(RegistryDomain::Policies.roots(&snap).len(), 1);
+        assert_eq!(root_identity("HKLM\\pol"), ("HKLM", "pol"));
+        assert_eq!(root_identity("Software\\Policies"), ("HKCU", "Software\\Policies"));
     }
 
     #[test]
@@ -428,11 +461,11 @@ mod tests {
         hklm.subkeys.insert("HKLM\\p\\child".into(), child);
         snap.policies.insert("HKLM\\p".into(), hklm);
 
-        let mut hkcu = KeySnapshot::default();
+        let hkcu = KeySnapshot::default();
         snap.policies.insert("p".into(), hkcu);
 
         let roots = RegistryDomain::Policies.roots(&snap);
-        let resolved_hklm = resolve_key(roots, &["HKLM\\p".to_string()]).unwrap();
+        let _ = resolve_key(roots, &["HKLM\\p".to_string()]).unwrap();
         let nested = resolve_key(roots, &["HKLM\\p".to_string(), "HKLM\\p\\child".to_string()]).unwrap();
         assert!(nested.values.contains_key("x"));
         let resolved_hkcu = resolve_key(roots, &["p".to_string()]);
@@ -464,7 +497,6 @@ mod tests {
             map.insert(format!("k{:02}", i), KeySnapshot::default());
         }
         // empty
-        let (e, hn) = page_entries(&map, None);
         // not empty map test for empty separately
         let empty: BTreeMap<String, KeySnapshot> = BTreeMap::new();
         let (ee, ehn) = page_entries(&empty, None);
