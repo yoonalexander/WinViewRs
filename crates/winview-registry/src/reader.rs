@@ -7,6 +7,7 @@ use windows::core::PWSTR;
 use windows::Win32::Foundation::{ERROR_NO_MORE_ITEMS, ERROR_SUCCESS, WIN32_ERROR};
 use windows::Win32::System::Registry::{RegEnumKeyExW, RegEnumValueW, HKEY};
 use windows_registry::{Key, Type as RegType, CURRENT_USER, LOCAL_MACHINE};
+use winview_core::inspection::{count_snapshot_read_errors, snapshot_has_successful_observations};
 use winview_core::model::{
     DecodingStatus, FolderTypeSnapshot, FolderTypesSnapshot, InspectionError, InspectionSnapshot,
     InspectionStatus, KeySnapshot, ObservationSource, RawRegistryValue, ReadError, RegistryValue,
@@ -1676,72 +1677,6 @@ fn snapshot_has_snapshot_size_limit(snapshot: &InspectionSnapshot) -> bool {
         .any(|map| map.values().any(has_snapshot_size_limit_error))
 }
 
-fn count_key_read_errors(key: &KeySnapshot) -> usize {
-    key.read_errors.len()
-        + key
-            .subkeys
-            .values()
-            .map(count_key_read_errors)
-            .sum::<usize>()
-}
-
-fn count_folder_types_read_errors(folder_types: &FolderTypesSnapshot) -> usize {
-    folder_types.read_errors.len()
-        + folder_types
-            .types
-            .values()
-            .map(|folder| folder.read_errors.len())
-            .sum::<usize>()
-}
-
-fn count_snapshot_read_errors(snapshot: &InspectionSnapshot) -> usize {
-    snapshot.errors.len()
-        + count_folder_types_read_errors(&snapshot.hkcu_folder_types)
-        + count_folder_types_read_errors(&snapshot.hklm_folder_types)
-        + count_key_read_errors(&snapshot.advanced)
-        + [
-            &snapshot.bags,
-            &snapshot.streams,
-            &snapshot.clsid,
-            &snapshot.policies,
-        ]
-        .iter()
-        .map(|domain| domain.values().map(count_key_read_errors).sum::<usize>())
-        .sum::<usize>()
-}
-
-fn key_has_successful_observations(key: &KeySnapshot) -> bool {
-    key.values
-        .values()
-        .any(|value| matches!(value, ValueReadResult::Success(_)))
-        || key.subkeys.values().any(key_has_successful_observations)
-}
-
-fn folder_types_has_successful_observations(folder_types: &FolderTypesSnapshot) -> bool {
-    folder_types.types.values().any(|folder| {
-        folder.canonical_name.is_some()
-            || folder.top_views.values().any(|view| {
-                view.raw_values
-                    .values()
-                    .any(|value| matches!(value, ValueReadResult::Success(_)))
-            })
-    })
-}
-
-fn snapshot_has_successful_observations(snapshot: &InspectionSnapshot) -> bool {
-    folder_types_has_successful_observations(&snapshot.hkcu_folder_types)
-        || folder_types_has_successful_observations(&snapshot.hklm_folder_types)
-        || key_has_successful_observations(&snapshot.advanced)
-        || [
-            &snapshot.bags,
-            &snapshot.streams,
-            &snapshot.clsid,
-            &snapshot.policies,
-        ]
-        .iter()
-        .any(|domain| domain.values().any(key_has_successful_observations))
-}
-
 fn finalize_inspection_status(snapshot: &mut InspectionSnapshot) {
     let total = count_snapshot_read_errors(snapshot);
 
@@ -1786,6 +1721,10 @@ mod depth_tests {
     use std::collections::BTreeMap;
     use std::collections::BTreeSet;
     use std::sync::{Arc, Mutex};
+    use winview_core::inspection::{
+        count_folder_types_read_errors, count_key_read_errors, count_snapshot_read_errors,
+        snapshot_has_successful_observations,
+    };
     use winview_core::model::{InspectionSnapshot, KeySnapshot, ObservationSource};
 
     type FakeValue = (u32, Vec<u8>, Option<RegistryValue>, DecodingStatus);

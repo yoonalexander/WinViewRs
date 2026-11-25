@@ -3,39 +3,11 @@
 use anyhow::Result;
 use std::io::{self, Write};
 use std::process::ExitCode;
-use winview_core::model::{FolderTypesSnapshot, InspectionSnapshot, KeySnapshot};
+use winview_core::inspection::count_snapshot_read_errors;
+use winview_core::model::InspectionSnapshot;
 use winview_core::RegistryReader;
 
 use super::write_snapshot_with_status;
-
-fn count_key_errors(key: &KeySnapshot) -> usize {
-    key.read_errors.len() + key.subkeys.values().map(count_key_errors).sum::<usize>()
-}
-
-fn count_folder_types_errors(folder_types: &FolderTypesSnapshot) -> usize {
-    folder_types.read_errors.len()
-        + folder_types
-            .types
-            .values()
-            .map(|folder| folder.read_errors.len())
-            .sum::<usize>()
-}
-
-fn count_inspection_errors(snapshot: &InspectionSnapshot) -> usize {
-    snapshot.errors.len()
-        + count_folder_types_errors(&snapshot.hkcu_folder_types)
-        + count_folder_types_errors(&snapshot.hklm_folder_types)
-        + count_key_errors(&snapshot.advanced)
-        + [
-            &snapshot.bags,
-            &snapshot.streams,
-            &snapshot.clsid,
-            &snapshot.policies,
-        ]
-        .iter()
-        .map(|domain| domain.values().map(count_key_errors).sum::<usize>())
-        .sum::<usize>()
-}
 
 pub fn run_inspect() -> Result<ExitCode> {
     let reader = winview_registry::WindowsRegistryReader;
@@ -116,7 +88,7 @@ pub(super) fn write_snapshot_summary(
         "Policies: {} top-level keys",
         snapshot.policies.len()
     )?;
-    writeln!(writer, "Errors: {}", count_inspection_errors(snapshot))?;
+    writeln!(writer, "Errors: {}", count_snapshot_read_errors(snapshot))?;
 
     writer.flush()?;
     Ok(())
@@ -148,8 +120,8 @@ pub fn run_dump_json() -> Result<ExitCode> {
 mod tests {
     use super::*;
     use winview_core::model::{
-        DecodingStatus, FolderTypeSnapshot, InspectionError, InspectionStatus, ObservationSource,
-        RawRegistryValue, ReadError, ValueReadResult,
+        DecodingStatus, FolderTypeSnapshot, InspectionError, InspectionStatus, KeySnapshot,
+        ObservationSource, RawRegistryValue, ReadError, ValueReadResult,
     };
     use winview_core::registry::keys::RootKey;
 
@@ -316,7 +288,7 @@ mod tests {
             domain.insert("root".into(), root);
         }
 
-        assert_eq!(count_inspection_errors(&snapshot), 10);
+        assert_eq!(count_snapshot_read_errors(&snapshot), 10);
 
         let mut bytes = Vec::new();
 
@@ -340,7 +312,7 @@ mod tests {
             }),
         );
 
-        assert_eq!(count_inspection_errors(&snapshot), 0);
+        assert_eq!(count_snapshot_read_errors(&snapshot), 0);
 
         snapshot.advanced.values.insert(
             "DeniedValue".into(),
@@ -356,7 +328,7 @@ mod tests {
             error: "DeniedValue: Access denied".into(),
         });
 
-        assert_eq!(count_inspection_errors(&snapshot), 1);
+        assert_eq!(count_snapshot_read_errors(&snapshot), 1);
 
         let mut bytes = Vec::new();
 

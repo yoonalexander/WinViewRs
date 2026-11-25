@@ -1,6 +1,7 @@
 // winview-core/src/lib.rs
 
 pub mod error;
+pub mod inspection;
 pub mod model;
 pub mod registry;
 pub mod test_support;
