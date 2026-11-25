@@ -13,7 +13,7 @@ The current implementation is a **read-only Explorer configuration inspector**. 
 ## Current status
 
 - **Phase 0: Read-only inspection foundation** — implemented. Registry reads, value decoding, structured snapshots, CLI output, and resource-bounded traversal.
-- **Phase 1: Read-only desktop GUI** — not yet implemented. The current GUI files are placeholders, not a usable desktop interface.
+- **Phase 1: Read-only desktop GUI** — foundation implemented. The native GUI can now launch but does not yet connect to registry inspection.
 - **Later phases**: Configuration planning, backups, restoration, and explicitly authorized application of changes.
 
 ## Features
@@ -35,6 +35,7 @@ Implemented capabilities:
 - Structured inspection errors.
 - Human-readable, JSON, and TOML CLI output.
 - Registry traversal and captured-payload limits.
+- Feature-gated native GUI launcher (`cargo run -p winview-app --features gui -- gui`).
 
 Inspection is limited to the configured registry domains listed above.
 
@@ -66,6 +67,9 @@ cargo run -p winview-app -- inspect
 cargo run -p winview-app -- dump --format json
 
 cargo run -p winview-app -- export
+
+# Launch the native GUI (feature-gated)
+cargo run -p winview-app --features gui -- gui
 ```
 
 JSON is the preferred machine-readable inspection format.
@@ -93,12 +97,12 @@ WinViewRs is organized as a three-crate Rust workspace:
 
 - **winview-core**: Platform-neutral models, registry traits, shared inspection utilities, version capabilities, and test support.
 - **winview-registry**: Windows registry access, native enumeration, decoding, inspection, and version detection.
-- **winview-app**: CLI commands, output formatting, profile model, and feature-gated GUI skeleton.
+- **winview-app**: CLI commands, output formatting, profile model, and feature-gated GUI.
 
 ```text
-                 App Layer (winview-app)
-          CLI: inspect / dump / export
-          GUI: egui/eframe skeleton (feature-gated)
+                  App Layer (winview-app)
+          CLI: inspect / dump / export / gui
+          GUI: egui/eframe (feature-gated)
                     |
                     v
           Core Layer (winview-core)
@@ -106,12 +110,14 @@ WinViewRs is organized as a three-crate Rust workspace:
    shared error-counting utilities, version model
                     |
                     v
-      Platform Layer (winview-registry)
+        Platform Layer (winview-registry)
    WindowsRegistryReader, native Win32 enumeration,
    RtlGetVersion detection, decoding, resource limits
 ```
 
 `winview-core` builds on all platforms; `winview-registry` and `winview-app` are Windows-specific.
+
+Dependency flow: `winview-app` depends on `winview-core` and `winview-registry`; `winview-registry` depends on `winview-core`. `winview-core` has no dependency on the Windows adapter.
 
 ## Safety
 
@@ -135,6 +141,21 @@ cargo test --workspace
 Windows workspace CI runs `cargo check`, `cargo fmt --check`, `cargo clippy`, and `cargo test` on `windows-latest`. A separate Linux/macOS CI job builds and tests `winview-core` only.
 
 There are 11 live-registry integration tests, all marked `#[ignore]`. They require direct Windows registry access and are not claimed to run automatically in CI.
+
+## GUI (Phase 1 foundation)
+
+The native GUI is an initial foundation. It can be launched with:
+
+```powershell
+cargo run -p winview-app --features gui -- gui
+```
+
+Current GUI state:
+
+- The window opens and displays the application title and read-only status.
+- Registry inspection is **not yet connected** to the GUI.
+- The CLI remains the functional inspection interface.
+- Phase 1 remains strictly read-only.
 
 ## Known limitations
 

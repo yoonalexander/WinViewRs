@@ -60,8 +60,8 @@ Clearly attribute Les Ferch and distinguish the Rust implementation from the ori
 
 ## Current Milestone
 
-Phase 0: Research and architecture.
+Phase 0: Complete. Baseline established in `docs/PHASE_0_COMPLETION.md`.
 
-Phase 1: Read-only Explorer configuration inspection.
+Phase 1: Read-only desktop GUI foundation — native window launch implemented, registry inspection not yet connected.
 
 No registry modifications are authorized.

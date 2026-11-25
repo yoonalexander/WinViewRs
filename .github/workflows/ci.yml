@@ -18,6 +18,9 @@ jobs:
       - run: cargo fmt --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
+      - run: cargo check -p winview-app --features gui
+      - run: cargo clippy -p winview-app --features gui --all-targets -- -D warnings
+      - run: cargo test -p winview-app --features gui
 
   core-cross-platform:
     runs-on: ${{ matrix.os }}

@@ -40,6 +40,8 @@ Platform Layer (winview-registry)
 
 `winview-core` builds on all platforms. `winview-registry` and `winview-app` are Windows-specific. The `gui` feature is off by default.
 
+Dependency flow: `winview-app` depends on `winview-core` and `winview-registry`; `winview-registry` depends on `winview-core`. `winview-core` has no dependency on the Windows adapter.
+
 The upstream reference repository at `../WinSetView-reference` is present and strictly read-only; it was not modified during this milestone.
 
 ## 3. Implemented inspection domains
@@ -49,9 +51,9 @@ Each domain is inspected read-only. Absent optional keys are handled gracefully 
 | Domain | Hive | Key path | Presence policy |
 |---|---|---|---|
 | FolderTypes | HKCU | `Software\Microsoft\Windows\CurrentVersion\Explorer\FolderTypes` | Optional |
-| FolderTypes | HKLM | `Software\Microsoft\Windows\CurrentVersion\Explorer\FolderTypes` | Optional (HKCU missing tolerated) |
+| FolderTypes | HKLM | `Software\Microsoft\Windows\CurrentVersion\Explorer\FolderTypes` | Required (missing produces error) |
 | TopViews | Per folder-type GUID | `...\FolderTypes\{GUID}\TopViews\{00000000-...-0000}` | Optional per folder type |
-| Bags | HKCU | `...\Local Settings\...\Shell\BagMRU` | Optional |
+| Bags | HKCU | `...\Local Settings\...\Shell\Bags` | Optional |
 | BagMRU | HKCU | `...\Local Settings\...\Shell\BagMRU` | Optional |
 | AllFolders\Shell | HKCU | `...\Local Settings\...\Shell\Bags\AllFolders\Shell` | Optional |
 | AllFolders\ComDlg | HKCU | `...\Local Settings\...\Shell\Bags\AllFolders\ComDlg` | Optional |
@@ -60,7 +62,7 @@ Each domain is inspected read-only. Absent optional keys are handled gracefully 
 | Streams\Defaults | HKCU | `...\Explorer\Streams\Defaults` | Optional |
 | Streams\Desktop | HKCU | `...\Explorer\Streams\Desktop` | Optional |
 | Advanced | HKCU | `...\Explorer\Advanced` | Optional |
-| CLSID overrides | HKCU | 12 configured CLSID paths | Optional |
+| CLSID overrides | HKCU | 11 configured CLSID paths | Optional |
 | Explorer policies | HKCU/HKLM | `...\Policies\Explorer`, `...\Policies\ComDlg32\PlacesBar` | Optional |
 
 Advanced settings use a fixed list of supported value names: `HideFileExt`, `UseCompactMode`, `AutoCheckSelect`, `Hidden`, `LaunchTo`, `FullRowSelect`, `NoStrCmpLogical`.
@@ -68,6 +70,8 @@ Advanced settings use a fixed list of supported value names: `HideFileExt`, `Use
 ## 4. Registry value decoding behavior
 
 Raw bytes are always preserved regardless of decode outcome.
+
+Raw bytes are preserved for captured `RawRegistryValue` observations, subject to capture limits. `CanonicalName` is a documented exception (retained as a decoded string, not a complete raw restoration record).
 
 Recognized types are decoded into `RegistryValue`:
 
@@ -135,7 +139,7 @@ Exit codes:
 | 2 | Invalid command, arguments, or unsupported output format |
 | 3 | Partial inspection |
 
-`Complete` → 0, `Partial` → 3, `Failed` → 1. Serialization and I/O failures take precedence over inspection status. Tracing output is written to stderr.
+`Complete` → 0, `Partial` → 3, `Failed` → 1. Serialization and I/O failures take precedence over inspection status. Registry snapshots are emitted to stdout; tracing and operational error diagnostics may be written to stderr.
 
 ## 8. Resource limits
 

@@ -158,4 +158,30 @@ mod cli_tests {
 
         assert_eq!(output.status.code(), Some(expected_code));
     }
+
+    #[test]
+    fn cli_gui_help_respects_feature() {
+        let output = Command::new(get_binary())
+            .args(["gui", "--help"])
+            .output()
+            .expect("Failed to run CLI binary");
+
+        #[cfg(feature = "gui")]
+        {
+            assert_eq!(output.status.code(), Some(0));
+
+            let stdout = String::from_utf8_lossy(&output.stdout);
+
+            assert!(stdout.contains("gui"));
+
+            assert!(stdout.contains("Launch the read-only desktop inspector"));
+        }
+
+        #[cfg(not(feature = "gui"))]
+        {
+            assert_eq!(output.status.code(), Some(2));
+
+            assert!(output.stdout.is_empty());
+        }
+    }
 }

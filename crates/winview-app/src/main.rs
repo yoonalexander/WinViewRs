@@ -29,6 +29,9 @@ enum Commands {
     },
     /// Export inspection snapshot as TOML (lossy, for debugging)
     Export,
+    /// Launch the read-only desktop inspector
+    #[cfg(feature = "gui")]
+    Gui,
 }
 
 fn main() -> Result<ExitCode> {
@@ -50,5 +53,12 @@ fn main() -> Result<ExitCode> {
         }
 
         Commands::Export => cli::output::run_export_toml(),
+
+        #[cfg(feature = "gui")]
+        Commands::Gui => {
+            winview_app::gui::run_gui()?;
+
+            Ok(ExitCode::SUCCESS)
+        }
     }
 }
