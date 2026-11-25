@@ -204,7 +204,12 @@ impl RegistryReader for WindowsRegistryReader {
         snapshot.metadata.detection_method = version_info.detection_method;
 
         // Inspect each domain, collecting errors
-        inspect_folder_types(self, &mut snapshot, &mut snapshot_budget);
+        inspect_folder_types(
+            self,
+            &mut snapshot,
+            &mut snapshot_budget,
+            MAX_KEYS_PER_DOMAIN,
+        );
 
         inspect_bags(self, &mut snapshot, &mut snapshot_budget);
 
@@ -477,11 +482,15 @@ fn decode_reg_multi_sz(data: &[u8]) -> Result<Vec<String>, String> {
 
 // Inspection modules - collect errors instead of failing
 fn inspect_folder_types(
-    reader: &WindowsRegistryReader,
+    reader: &dyn RegistryReader,
     snapshot: &mut InspectionSnapshot,
     snapshot_budget: &mut SnapshotBudget,
+    max_keys: usize,
 ) {
     use winview_core::registry::keys::paths::{HKCU_FOLDER_TYPES, HKLM_FOLDER_TYPES};
+
+    let mut traversal_budget = TraversalBudget::new(max_keys);
+
     inspect_folder_types_hive(
         reader,
         RootKey::Hkcu,
@@ -490,9 +499,9 @@ fn inspect_folder_types(
         &mut snapshot.hkcu_folder_types,
         MAX_VALUE_BYTES,
         snapshot_budget,
+        &mut traversal_budget,
     );
 
-    // HKLM FolderTypes
     inspect_folder_types_hive(
         reader,
         RootKey::Hklm,
@@ -501,9 +510,42 @@ fn inspect_folder_types(
         &mut snapshot.hklm_folder_types,
         MAX_VALUE_BYTES,
         snapshot_budget,
+        &mut traversal_budget,
     );
 }
 
+fn reserve_folder_type_key_open(
+    budget: &mut TraversalBudget,
+    folder_types: &mut FolderTypesSnapshot,
+    root: RootKey,
+    path: &str,
+) -> bool {
+    if budget.limit_exceeded {
+        return false;
+    }
+
+    if budget.is_exhausted() {
+        budget.limit_exceeded = true;
+
+        folder_types.read_errors.push(InspectionError {
+            key_path: path.to_string(),
+            root,
+            operation: "key_limit".to_string(),
+            error: format!(
+                "Maximum registry keys per domain ({}) exceeded",
+                budget.max_keys
+            ),
+        });
+
+        return false;
+    }
+
+    budget.record_visit();
+
+    true
+}
+
+#[allow(clippy::too_many_arguments)]
 fn inspect_folder_types_hive(
     reader: &dyn RegistryReader,
     root: RootKey,
@@ -512,11 +554,16 @@ fn inspect_folder_types_hive(
     folder_types: &mut FolderTypesSnapshot,
     max_value_bytes: usize,
     snapshot_budget: &mut SnapshotBudget,
+    traversal_budget: &mut TraversalBudget,
 ) {
     use winview_core::registry::keys::paths::{
         CANONICAL_NAME, COLUMN_LIST, COL_INFO, F_FLAGS, GROUP_ASCENDING, GROUP_BY, ICON_SIZE,
         LOGICAL_VIEW_MODE, MODE, SORT_BY_LIST,
     };
+
+    if !reserve_folder_type_key_open(traversal_budget, folder_types, root, path) {
+        return;
+    }
 
     // Open the FolderTypes key
     let key_result = reader.open_key(root, path);
@@ -552,6 +599,9 @@ fn inspect_folder_types_hive(
 
     for guid in guids {
         let guid_path = format!(r"{}\{}", path, guid);
+        if !reserve_folder_type_key_open(traversal_budget, folder_types, root, &guid_path) {
+            break;
+        }
         let guid_key_result = reader.open_key(root, &guid_path);
         let guid_key = match guid_key_result {
             Ok(k) => k,
@@ -619,6 +669,19 @@ fn inspect_folder_types_hive(
             r"{}\TopViews\{{00000000-0000-0000-0000-000000000000}}",
             guid_path
         );
+        if !reserve_folder_type_key_open(traversal_budget, folder_types, root, &top_views_path) {
+            folder_types.types.insert(
+                guid.clone(),
+                FolderTypeSnapshot {
+                    guid,
+                    canonical_name,
+                    top_views: BTreeMap::new(),
+                    read_errors: Vec::new(),
+                },
+            );
+
+            break;
+        }
         let top_views_key_result = reader.open_key(root, &top_views_path);
         let top_views_key = match top_views_key_result {
             Ok(k) => k,
@@ -1388,14 +1451,24 @@ fn snapshot_has_depth_limit(snapshot: &InspectionSnapshot) -> bool {
 }
 
 fn snapshot_has_key_limit(snapshot: &InspectionSnapshot) -> bool {
-    [
-        &snapshot.bags,
-        &snapshot.streams,
-        &snapshot.clsid,
-        &snapshot.policies,
-    ]
-    .iter()
-    .any(|map| map.values().any(has_key_limit_error))
+    snapshot
+        .hkcu_folder_types
+        .read_errors
+        .iter()
+        .any(|e| e.operation == "key_limit")
+        || snapshot
+            .hklm_folder_types
+            .read_errors
+            .iter()
+            .any(|e| e.operation == "key_limit")
+        || [
+            &snapshot.bags,
+            &snapshot.streams,
+            &snapshot.clsid,
+            &snapshot.policies,
+        ]
+        .iter()
+        .any(|map| map.values().any(has_key_limit_error))
 }
 
 fn has_value_count_limit_error(key: &KeySnapshot) -> bool {
@@ -2022,11 +2095,57 @@ mod depth_tests {
             target,
             MAX_VALUE_BYTES,
             &mut budget,
+            &mut TraversalBudget::new(MAX_KEYS_PER_DOMAIN),
         );
 
         finalize_inspection_status(&mut snapshot);
 
         (snapshot, budget)
+    }
+
+    fn inspect_folder_types_with_key_limit(
+        reader: &dyn RegistryReader,
+        max_keys: usize,
+    ) -> (InspectionSnapshot, SnapshotBudget, TraversalBudget) {
+        let mut snapshot = InspectionSnapshot::default();
+
+        let mut snapshot_budget = SnapshotBudget::new(MAX_SNAPSHOT_BYTES);
+
+        let mut traversal_budget = TraversalBudget::new(max_keys);
+
+        inspect_folder_types_hive(
+            reader,
+            RootKey::Hkcu,
+            TEST_FOLDER_TYPES,
+            ObservationSource::HkcuFolderTypes,
+            &mut snapshot.hkcu_folder_types,
+            MAX_VALUE_BYTES,
+            &mut snapshot_budget,
+            &mut traversal_budget,
+        );
+
+        finalize_inspection_status(&mut snapshot);
+
+        (snapshot, snapshot_budget, traversal_budget)
+    }
+
+    fn assert_folder_types_key_limit(snapshot: &InspectionSnapshot) {
+        assert!(snapshot_has_key_limit(snapshot));
+
+        assert!(matches!(
+            &snapshot.status,
+            InspectionStatus::Partial { reason }
+                if reason ==
+                    "Maximum registry key count exceeded"
+        ));
+
+        let limit_errors = [&snapshot.hkcu_folder_types, &snapshot.hklm_folder_types]
+            .iter()
+            .flat_map(|folder_types| folder_types.read_errors.iter())
+            .filter(|error| error.operation == "key_limit")
+            .count();
+
+        assert_eq!(limit_errors, 1);
     }
 
     #[test]
@@ -2833,6 +2952,7 @@ mod depth_tests {
             &mut snapshot.hkcu_folder_types,
             4,
             &mut snapshot_budget,
+            &mut TraversalBudget::new(MAX_KEYS_PER_DOMAIN),
         );
 
         finalize_inspection_status(&mut snapshot);
@@ -2873,6 +2993,7 @@ mod depth_tests {
             &mut snapshot.hkcu_folder_types,
             4,
             &mut snapshot_budget,
+            &mut TraversalBudget::new(MAX_KEYS_PER_DOMAIN),
         );
 
         finalize_inspection_status(&mut snapshot);
@@ -2924,6 +3045,7 @@ mod depth_tests {
             &mut snapshot.hkcu_folder_types,
             4,
             &mut snapshot_budget,
+            &mut TraversalBudget::new(MAX_KEYS_PER_DOMAIN),
         );
 
         finalize_inspection_status(&mut snapshot);
@@ -2975,6 +3097,7 @@ mod depth_tests {
             &mut snapshot.hklm_folder_types,
             4,
             &mut snapshot_budget,
+            &mut TraversalBudget::new(MAX_KEYS_PER_DOMAIN),
         );
 
         finalize_inspection_status(&mut snapshot);
@@ -3102,6 +3225,7 @@ mod depth_tests {
             &mut snapshot.hkcu_folder_types,
             MAX_VALUE_BYTES,
             &mut snapshot_budget,
+            &mut TraversalBudget::new(MAX_KEYS_PER_DOMAIN),
         );
 
         finalize_inspection_status(&mut snapshot);
@@ -3144,6 +3268,7 @@ mod depth_tests {
             &mut snapshot.hkcu_folder_types,
             MAX_VALUE_BYTES,
             &mut snapshot_budget,
+            &mut TraversalBudget::new(MAX_KEYS_PER_DOMAIN),
         );
 
         finalize_inspection_status(&mut snapshot);
@@ -3196,6 +3321,7 @@ mod depth_tests {
             &mut snapshot.hkcu_folder_types,
             MAX_VALUE_BYTES,
             &mut snapshot_budget,
+            &mut TraversalBudget::new(MAX_KEYS_PER_DOMAIN),
         );
 
         finalize_inspection_status(&mut snapshot);
@@ -3249,6 +3375,7 @@ mod depth_tests {
             &mut snapshot.hkcu_folder_types,
             MAX_VALUE_BYTES,
             &mut snapshot_budget,
+            &mut TraversalBudget::new(MAX_KEYS_PER_DOMAIN),
         );
 
         inspect_folder_types_hive(
@@ -3259,6 +3386,7 @@ mod depth_tests {
             &mut snapshot.hklm_folder_types,
             MAX_VALUE_BYTES,
             &mut snapshot_budget,
+            &mut TraversalBudget::new(MAX_KEYS_PER_DOMAIN),
         );
 
         finalize_inspection_status(&mut snapshot);
@@ -3572,6 +3700,7 @@ mod depth_tests {
             &mut snapshot.hkcu_folder_types,
             MAX_VALUE_BYTES,
             &mut snapshot_budget,
+            &mut TraversalBudget::new(MAX_KEYS_PER_DOMAIN),
         );
 
         let mut budget = TraversalBudget::new(MAX_KEYS_PER_DOMAIN);
@@ -4010,6 +4139,7 @@ mod depth_tests {
             &mut snapshot.hkcu_folder_types,
             MAX_VALUE_BYTES,
             &mut snapshot_budget,
+            &mut TraversalBudget::new(MAX_KEYS_PER_DOMAIN),
         );
 
         finalize_inspection_status(&mut snapshot);
@@ -4393,6 +4523,7 @@ mod depth_tests {
             &mut snapshot.hkcu_folder_types,
             MAX_VALUE_BYTES,
             &mut snapshot_budget,
+            &mut TraversalBudget::new(MAX_KEYS_PER_DOMAIN),
         );
 
         finalize_inspection_status(&mut snapshot);
@@ -4456,6 +4587,7 @@ mod depth_tests {
             &mut snapshot.hkcu_folder_types,
             MAX_VALUE_BYTES,
             &mut snapshot_budget,
+            &mut TraversalBudget::new(MAX_KEYS_PER_DOMAIN),
         );
 
         finalize_inspection_status(&mut snapshot);
@@ -4662,6 +4794,7 @@ mod depth_tests {
             &mut snapshot.hkcu_folder_types,
             MAX_VALUE_BYTES,
             &mut snapshot_budget,
+            &mut TraversalBudget::new(MAX_KEYS_PER_DOMAIN),
         );
 
         finalize_inspection_status(&mut snapshot);
@@ -5499,5 +5632,263 @@ mod depth_tests {
         assert_eq!(count_snapshot_read_errors(&snapshot), 1);
 
         assert!(matches!(snapshot.status, InspectionStatus::Partial { .. }));
+    }
+
+    #[test]
+    fn folder_types_zero_key_budget_prevents_opening() {
+        let reader = build_folder_types_fixture(Some("A"), false);
+
+        let (snapshot, bytes, traversal) = inspect_folder_types_with_key_limit(&reader, 0);
+
+        assert!(reader.opened_keys.lock().unwrap().is_empty());
+
+        assert_eq!(traversal.visited_keys, 0);
+        assert!(traversal.limit_exceeded);
+        assert_eq!(bytes.captured_bytes, 0);
+
+        assert!(snapshot.hkcu_folder_types.types.is_empty());
+
+        assert_eq!(count_snapshot_read_errors(&snapshot), 1);
+
+        assert_folder_types_key_limit(&snapshot);
+    }
+
+    #[test]
+    fn folder_types_exact_key_capacity_is_complete() {
+        let reader = build_folder_types_fixture(Some("A"), false);
+
+        let (snapshot, bytes, traversal) = inspect_folder_types_with_key_limit(&reader, 3);
+
+        assert_eq!(traversal.visited_keys, 3);
+        assert!(!traversal.limit_exceeded);
+
+        assert_eq!(reader.opened_keys.lock().unwrap().len(), 3);
+
+        let folder = snapshot
+            .hkcu_folder_types
+            .types
+            .get(TEST_FOLDER_GUID)
+            .unwrap();
+
+        assert_eq!(folder.canonical_name.as_deref(), Some("A"));
+
+        assert_eq!(folder.top_views[TEST_VIEW_GUID].mode, Some(42));
+
+        assert_eq!(bytes.captured_bytes, 8);
+
+        assert_eq!(count_snapshot_read_errors(&snapshot), 0);
+
+        assert!(matches!(snapshot.status, InspectionStatus::Complete));
+    }
+
+    #[test]
+    fn folder_types_limit_before_guid_open() {
+        let reader = build_folder_types_fixture(Some("A"), false);
+
+        let (snapshot, bytes, traversal) = inspect_folder_types_with_key_limit(&reader, 1);
+
+        assert_eq!(traversal.visited_keys, 1);
+
+        assert_eq!(reader.opened_keys.lock().unwrap().len(), 1);
+
+        assert!(traversal.limit_exceeded);
+        assert_eq!(bytes.captured_bytes, 0);
+
+        assert!(snapshot.hkcu_folder_types.types.is_empty());
+
+        let error = &snapshot.hkcu_folder_types.read_errors[0];
+
+        assert_eq!(
+            error.key_path,
+            format!(r"{}\{}", TEST_FOLDER_TYPES, TEST_FOLDER_GUID,)
+        );
+
+        assert_folder_types_key_limit(&snapshot);
+    }
+
+    #[test]
+    fn folder_types_limit_preserves_canonical_name() {
+        let reader = build_folder_types_fixture(Some("A"), false);
+
+        let (snapshot, bytes, traversal) = inspect_folder_types_with_key_limit(&reader, 2);
+
+        assert_eq!(traversal.visited_keys, 2);
+
+        assert_eq!(reader.opened_keys.lock().unwrap().len(), 2);
+
+        assert!(traversal.limit_exceeded);
+
+        let folder = snapshot
+            .hkcu_folder_types
+            .types
+            .get(TEST_FOLDER_GUID)
+            .expect("Captured FolderType was lost");
+
+        assert_eq!(folder.canonical_name.as_deref(), Some("A"));
+
+        assert!(folder.top_views.is_empty());
+
+        assert_eq!(bytes.captured_bytes, 4);
+
+        let error = &snapshot.hkcu_folder_types.read_errors[0];
+
+        assert_eq!(
+            error.key_path,
+            format!(
+                r"{}\{}\TopViews\{}",
+                TEST_FOLDER_TYPES, TEST_FOLDER_GUID, TEST_VIEW_GUID,
+            )
+        );
+
+        assert_folder_types_key_limit(&snapshot);
+    }
+
+    #[test]
+    fn folder_types_failed_openings_consume_budget() {
+        let missing_guid = "{22222222-2222-2222-2222-222222222222}";
+
+        let mut reader = build_folder_types_fixture(Some("A"), false);
+
+        Arc::make_mut(&mut reader.data)
+            .get_mut(TEST_FOLDER_TYPES)
+            .unwrap()
+            .insert(0, missing_guid.to_string());
+
+        let (snapshot, bytes, traversal) = inspect_folder_types_with_key_limit(&reader, 3);
+
+        assert_eq!(traversal.visited_keys, 3);
+        assert!(traversal.limit_exceeded);
+
+        let opened = reader.opened_keys.lock().unwrap();
+
+        assert_eq!(opened.len(), 3);
+
+        assert_eq!(
+            opened[1].1,
+            format!(r"{}\{}", TEST_FOLDER_TYPES, missing_guid,)
+        );
+
+        assert_eq!(snapshot.hkcu_folder_types.read_errors.len(), 2);
+
+        assert_eq!(
+            snapshot.hkcu_folder_types.read_errors[0].operation,
+            "open_key"
+        );
+
+        let folder = snapshot
+            .hkcu_folder_types
+            .types
+            .get(TEST_FOLDER_GUID)
+            .unwrap();
+
+        assert_eq!(folder.canonical_name.as_deref(), Some("A"));
+
+        assert!(folder.top_views.is_empty());
+
+        assert_eq!(bytes.captured_bytes, 4);
+
+        assert_folder_types_key_limit(&snapshot);
+    }
+
+    #[test]
+    fn folder_types_key_budget_is_shared_across_hives() {
+        use winview_core::registry::keys::paths::{HKCU_FOLDER_TYPES, HKLM_FOLDER_TYPES};
+
+        // Both hive paths are identical relative
+        // to their respective registry roots.
+        assert_eq!(HKCU_FOLDER_TYPES, HKLM_FOLDER_TYPES);
+
+        let root_path = HKCU_FOLDER_TYPES;
+
+        let guid_path = format!(r"{}\{}", root_path, TEST_FOLDER_GUID,);
+
+        let view_path = format!(r"{}\TopViews\{}", guid_path, TEST_VIEW_GUID,);
+
+        let mut data = BTreeMap::new();
+
+        data.insert(root_path.to_string(), vec![TEST_FOLDER_GUID.to_string()]);
+
+        data.insert(guid_path.clone(), Vec::new());
+
+        data.insert(view_path.clone(), Vec::new());
+
+        let mut values = FakeValues::new();
+
+        values.entry(guid_path).or_default().insert(
+            "CanonicalName".into(),
+            (
+                1,
+                utf16_units_to_bytes(&[65, 0]),
+                Some(RegistryValue::String("A".into())),
+                DecodingStatus::Decoded,
+            ),
+        );
+
+        values.entry(view_path).or_default().insert(
+            "Mode".into(),
+            (
+                4,
+                42u32.to_le_bytes().to_vec(),
+                Some(RegistryValue::Dword(42)),
+                DecodingStatus::Decoded,
+            ),
+        );
+
+        for max_keys in [2, 3, 6] {
+            let reader = FakeReader::with_values(data.clone(), values.clone());
+
+            let mut snapshot = InspectionSnapshot::default();
+
+            let mut byte_budget = SnapshotBudget::new(MAX_SNAPSHOT_BYTES);
+
+            inspect_folder_types(&reader, &mut snapshot, &mut byte_budget, max_keys);
+
+            finalize_inspection_status(&mut snapshot);
+
+            let opened = reader.opened_keys.lock().unwrap();
+
+            assert_eq!(opened.len(), max_keys);
+
+            let hkcu_folder = &snapshot.hkcu_folder_types.types[TEST_FOLDER_GUID];
+
+            assert_eq!(hkcu_folder.canonical_name.as_deref(), Some("A"));
+
+            if max_keys == 2 {
+                assert!(hkcu_folder.top_views.is_empty());
+
+                assert!(snapshot.hklm_folder_types.read_errors.is_empty());
+
+                assert_folder_types_key_limit(&snapshot);
+            } else if max_keys == 3 {
+                assert_eq!(hkcu_folder.top_views[TEST_VIEW_GUID].mode, Some(42));
+
+                assert_eq!(snapshot.hklm_folder_types.read_errors.len(), 1);
+
+                assert_eq!(
+                    snapshot.hklm_folder_types.read_errors[0].root,
+                    RootKey::Hklm
+                );
+
+                assert_folder_types_key_limit(&snapshot);
+            } else {
+                assert_eq!(
+                    snapshot.hklm_folder_types.types[TEST_FOLDER_GUID].top_views[TEST_VIEW_GUID]
+                        .mode,
+                    Some(42)
+                );
+
+                assert_eq!(count_snapshot_read_errors(&snapshot), 0);
+
+                assert_eq!(byte_budget.captured_bytes, 16);
+
+                assert!(matches!(snapshot.status, InspectionStatus::Complete));
+            }
+
+            if max_keys < 6 {
+                assert!(snapshot.hklm_folder_types.types.is_empty());
+
+                assert!(opened.iter().all(|(root, _)| { *root == RootKey::Hkcu }));
+            }
+        }
     }
 }
