@@ -350,9 +350,7 @@ mod tests {
 
     use std::collections::BTreeMap;
 
-    use winview_core::model::{
-        FolderTypeSnapshot, InspectionSnapshot, ViewSnapshot,
-    };
+    use winview_core::model::{FolderTypeSnapshot, InspectionSnapshot, ViewSnapshot};
 
     use winview_core::RootKey;
 
@@ -493,8 +491,9 @@ mod tests {
         assert_eq!(browser.view_index, 0);
 
         browser.select_folder("GUID-C");
+        browser.view_index = 3;
         browser.select_folder("GUID-C");
-        assert_eq!(browser.view_index, 0);
+        assert_eq!(browser.view_index, 3);
 
         browser.select_root(RootKey::Hkcu);
         assert_eq!(browser.root, RootKey::Hkcu);
@@ -573,6 +572,16 @@ mod tests {
         let emoji = "🎉🚀💻🌟";
         let emoji_preview = preview_text(emoji);
         assert!(!emoji_preview.is_empty());
+
+        for character in ['한', '😀'] {
+            let text = character.to_string().repeat(161);
+
+            let preview = preview_text(&text);
+
+            assert_eq!(preview, format!("{}…", character.to_string().repeat(160)));
+
+            assert_eq!(preview.chars().count(), 161);
+        }
 
         assert_eq!(text_or_unavailable(None), "Unavailable");
         assert_eq!(text_or_unavailable(Some("")), "(empty string)");

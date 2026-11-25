@@ -8,6 +8,7 @@ use winview_core::RegistryReader;
 
 use super::inspection::InspectionState;
 
+use super::advanced::show_advanced;
 use super::folder_types::FolderBrowser;
 use super::overview::show_overview;
 
@@ -16,6 +17,7 @@ enum InspectorPage {
     #[default]
     Overview,
     FolderTypes,
+    Advanced,
 }
 
 #[derive(Default)]
@@ -113,6 +115,8 @@ impl eframe::App for WinViewApp {
                             InspectorPage::FolderTypes,
                             "FolderTypes",
                         );
+
+                        ui.selectable_value(&mut self.page, InspectorPage::Advanced, "Advanced");
                     });
 
                     match self.page {
@@ -133,6 +137,14 @@ impl eframe::App for WinViewApp {
                                         &result.snapshot,
                                         &result.folder_index,
                                     );
+                                });
+                        }
+
+                        InspectorPage::Advanced => {
+                            egui::ScrollArea::vertical()
+                                .id_salt("advanced_settings_scroll")
+                                .show(ui, |ui| {
+                                    show_advanced(ui, &result.snapshot.advanced);
                                 });
                         }
                     }

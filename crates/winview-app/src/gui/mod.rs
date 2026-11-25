@@ -1,6 +1,8 @@
 // winview-app/src/gui/mod.rs
 
 #[cfg(feature = "gui")]
+mod advanced;
+#[cfg(feature = "gui")]
 pub mod app;
 #[cfg(feature = "gui")]
 pub mod folder_types;
