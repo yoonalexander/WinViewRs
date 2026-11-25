@@ -1475,16 +1475,42 @@ fn count_snapshot_read_errors(snapshot: &InspectionSnapshot) -> usize {
         .sum::<usize>()
 }
 
+fn key_has_successful_observations(key: &KeySnapshot) -> bool {
+    key.values
+        .values()
+        .any(|value| matches!(value, ValueReadResult::Success(_)))
+        || key.subkeys.values().any(key_has_successful_observations)
+}
+
+fn folder_types_has_successful_observations(folder_types: &FolderTypesSnapshot) -> bool {
+    folder_types.types.values().any(|folder| {
+        folder.canonical_name.is_some()
+            || folder.top_views.values().any(|view| {
+                view.raw_values
+                    .values()
+                    .any(|value| matches!(value, ValueReadResult::Success(_)))
+            })
+    })
+}
+
+fn snapshot_has_successful_observations(snapshot: &InspectionSnapshot) -> bool {
+    folder_types_has_successful_observations(&snapshot.hkcu_folder_types)
+        || folder_types_has_successful_observations(&snapshot.hklm_folder_types)
+        || key_has_successful_observations(&snapshot.advanced)
+        || [
+            &snapshot.bags,
+            &snapshot.streams,
+            &snapshot.clsid,
+            &snapshot.policies,
+        ]
+        .iter()
+        .any(|domain| domain.values().any(key_has_successful_observations))
+}
+
 fn finalize_inspection_status(snapshot: &mut InspectionSnapshot) {
     let total = count_snapshot_read_errors(snapshot);
 
-    let has_data = !snapshot.hkcu_folder_types.types.is_empty()
-        || !snapshot.hklm_folder_types.types.is_empty()
-        || !snapshot.bags.is_empty()
-        || !snapshot.streams.is_empty()
-        || !snapshot.advanced.values.is_empty()
-        || !snapshot.clsid.is_empty()
-        || !snapshot.policies.is_empty();
+    let has_data = snapshot_has_successful_observations(snapshot);
 
     if snapshot_has_depth_limit(snapshot) {
         snapshot.status = InspectionStatus::Partial {
@@ -3669,8 +3695,8 @@ mod depth_tests {
 
         assert!(matches!(
             snapshot.status,
-            InspectionStatus::Partial { reason }
-                if reason == "8 read errors encountered"
+            InspectionStatus::Failed { error }
+                if error == "Inspection failed with 8 errors"
         ));
     }
 
@@ -3831,7 +3857,7 @@ mod depth_tests {
 
         assert_eq!(count_snapshot_read_errors(&snapshot), 2);
 
-        assert!(!matches!(snapshot.status, InspectionStatus::Complete));
+        assert!(matches!(snapshot.status, InspectionStatus::Failed { .. }));
     }
 
     #[test]
@@ -3867,7 +3893,7 @@ mod depth_tests {
 
         assert_eq!(count_snapshot_read_errors(&snapshot), 1);
 
-        assert!(!matches!(snapshot.status, InspectionStatus::Complete));
+        assert!(matches!(snapshot.status, InspectionStatus::Failed { .. }));
     }
 
     #[test]
@@ -4063,7 +4089,7 @@ mod depth_tests {
 
         assert_eq!(count_snapshot_read_errors(&snapshot), 1);
 
-        assert!(!matches!(snapshot.status, InspectionStatus::Complete));
+        assert!(matches!(snapshot.status, InspectionStatus::Failed { .. }));
     }
 
     #[test]
@@ -4272,7 +4298,7 @@ mod depth_tests {
 
         assert_eq!(count_snapshot_read_errors(&snapshot), 1);
 
-        assert!(matches!(snapshot.status, InspectionStatus::Partial { .. }));
+        assert!(matches!(snapshot.status, InspectionStatus::Failed { .. }));
     }
 
     #[test]
