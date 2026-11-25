@@ -12,6 +12,37 @@ use winview_core::model::{
 use winview_core::registry::keys::{RootKey, ValueTypeName};
 use winview_core::registry::traits::{RegistryError, RegistryKey, RegistryReader, RegistryResult};
 
+fn registry_error_to_read_error(error: &RegistryError) -> ReadError {
+    match error {
+        RegistryError::KeyNotFound { path, .. } => ReadError::KeyNotFound { path: path.clone() },
+        RegistryError::ValueNotFound { name, .. } => {
+            ReadError::ValueNotFound { name: name.clone() }
+        }
+        RegistryError::AccessDenied { path, .. } => ReadError::AccessDenied { path: path.clone() },
+        _ => ReadError::Other(error.to_string()),
+    }
+}
+
+fn record_value_read_error(
+    errors: &mut Vec<InspectionError>,
+    root: RootKey,
+    path: &str,
+    value_name: &str,
+    error: &RegistryError,
+    optional: bool,
+) {
+    if optional && matches!(error, RegistryError::ValueNotFound { .. }) {
+        return;
+    }
+
+    errors.push(InspectionError {
+        key_path: path.to_string(),
+        root,
+        operation: "get_value".to_string(),
+        error: format!("Registry value {:?}: {}", value_name, error),
+    });
+}
+
 fn classify_windows_error(
     code: u32,
     root: RootKey,
@@ -581,7 +612,18 @@ fn inspect_folder_types_hive(
                     None
                 }
             }
-            Err(_) => None,
+            Err(e) => {
+                record_value_read_error(
+                    &mut folder_types.read_errors,
+                    root,
+                    &guid_path,
+                    CANONICAL_NAME,
+                    &e,
+                    true,
+                );
+
+                None
+            }
         };
 
         // Open TopViews\{00000000-0000-0000-0000-000000000000}
@@ -658,7 +700,18 @@ fn inspect_folder_types_hive(
                         source,
                     })
                 }
-                Err(e) => ValueReadResult::Failure(ReadError::Other(e.to_string())),
+                Err(e) => {
+                    record_value_read_error(
+                        &mut folder_types.read_errors,
+                        root,
+                        &top_views_path,
+                        const_name,
+                        &e,
+                        true,
+                    );
+
+                    ValueReadResult::Failure(registry_error_to_read_error(&e))
+                }
             };
             raw_values.insert(field_name.to_string(), read_result);
         }
@@ -934,7 +987,18 @@ fn inspect_advanced(
                     source: ObservationSource::HkcuAdvanced,
                 })
             }
-            Err(e) => ValueReadResult::Failure(ReadError::Other(e.to_string())),
+            Err(e) => {
+                record_value_read_error(
+                    &mut snapshot.advanced.read_errors,
+                    RootKey::Hkcu,
+                    ADVANCED,
+                    value_name,
+                    &e,
+                    true,
+                );
+
+                ValueReadResult::Failure(registry_error_to_read_error(&e))
+            }
         };
         snapshot
             .advanced
@@ -1210,7 +1274,18 @@ fn inspect_key_tree(
                             source,
                         })
                     }
-                    Err(e) => ValueReadResult::Failure(ReadError::Other(e.to_string())),
+                    Err(e) => {
+                        record_value_read_error(
+                            &mut snapshot.read_errors,
+                            root,
+                            path,
+                            &value_name,
+                            &e,
+                            false,
+                        );
+
+                        ValueReadResult::Failure(registry_error_to_read_error(&e))
+                    }
                 };
                 snapshot.values.insert(value_name, read_result);
             }
@@ -1456,6 +1531,14 @@ mod depth_tests {
 
     type FakeValues = BTreeMap<String, BTreeMap<String, FakeValue>>;
 
+    #[derive(Clone, Copy)]
+    enum InjectedValueFailure {
+        AccessDenied,
+        ValueNotFound,
+    }
+
+    type ValueFailures = BTreeMap<(String, String), InjectedValueFailure>;
+
     #[derive(Default)]
     struct EnumFailures {
         values: BTreeSet<String>,
@@ -1467,6 +1550,7 @@ mod depth_tests {
         opened_keys: Mutex<Vec<(RootKey, String)>>,
         values: Arc<FakeValues>,
         enum_failures: Arc<EnumFailures>,
+        value_failures: Arc<ValueFailures>,
     }
 
     impl FakeReader {
@@ -1476,6 +1560,7 @@ mod depth_tests {
                 opened_keys: Mutex::new(Vec::new()),
                 values: Arc::new(FakeValues::new()),
                 enum_failures: Arc::new(EnumFailures::default()),
+                value_failures: Arc::new(BTreeMap::new()),
             }
         }
 
@@ -1485,7 +1570,20 @@ mod depth_tests {
                 opened_keys: Mutex::new(Vec::new()),
                 values: Arc::new(values),
                 enum_failures: Arc::new(EnumFailures::default()),
+                value_failures: Arc::new(BTreeMap::new()),
             }
+        }
+
+        fn with_value_failure(
+            mut self,
+            path: &str,
+            name: &str,
+            failure: InjectedValueFailure,
+        ) -> Self {
+            Arc::make_mut(&mut self.value_failures)
+                .insert((path.to_string(), name.to_string()), failure);
+
+            self
         }
 
         fn with_enum_failures(mut self, value_paths: &[&str], subkey_paths: &[&str]) -> Self {
@@ -1503,6 +1601,7 @@ mod depth_tests {
         data: Arc<BTreeMap<String, Vec<String>>>,
         values: Arc<FakeValues>,
         enum_failures: Arc<EnumFailures>,
+        value_failures: Arc<ValueFailures>,
     }
 
     impl RegistryKey for FakeKey {
@@ -1533,6 +1632,23 @@ mod depth_tests {
             &self,
             name: &str,
         ) -> RegistryResult<(ValueTypeName, Vec<u8>, RegistryValue, DecodingStatus)> {
+            if let Some(failure) = self
+                .value_failures
+                .get(&(self.path.clone(), name.to_string()))
+            {
+                return Err(match failure {
+                    InjectedValueFailure::AccessDenied => RegistryError::AccessDenied {
+                        root: RootKey::Hkcu,
+                        path: self.path.clone(),
+                    },
+                    InjectedValueFailure::ValueNotFound => RegistryError::ValueNotFound {
+                        root: RootKey::Hkcu,
+                        path: self.path.clone(),
+                        name: name.to_string(),
+                    },
+                });
+            }
+
             if let Some(vals) = self.values.get(&self.path) {
                 if let Some((type_id, raw_bytes, decoded, status)) = vals.get(name) {
                     let decoded = decoded.clone().ok_or(RegistryError::InvalidData(
@@ -1557,8 +1673,8 @@ mod depth_tests {
             } else {
                 Err(RegistryError::ValueNotFound {
                     root: RootKey::Hkcu,
-                    path: "".into(),
-                    name: "".into(),
+                    path: self.path.clone(),
+                    name: name.to_string(),
                 })
             }
         }
@@ -1582,6 +1698,7 @@ mod depth_tests {
                     data: self.data.clone(),
                     values: self.values.clone(),
                     enum_failures: self.enum_failures.clone(),
+                    value_failures: self.value_failures.clone(),
                 }))
             } else {
                 Err(RegistryError::KeyNotFound {
@@ -1605,6 +1722,7 @@ mod depth_tests {
                     data: self.data.clone(),
                     values: self.values.clone(),
                     enum_failures: self.enum_failures.clone(),
+                    value_failures: self.value_failures.clone(),
                 }))
             } else {
                 Err(RegistryError::KeyNotFound {
@@ -3878,5 +3996,336 @@ mod depth_tests {
             unrelated,
             RegistryError::WindowsApi(msg) if msg == "object name not found"
         ));
+    }
+
+    #[test]
+    fn recursive_access_denied_value_is_reported() {
+        let reader = build_hierarchy(1).with_value_failure(
+            "root",
+            "TestValue",
+            InjectedValueFailure::AccessDenied,
+        );
+
+        let (snapshot, _) = inspect_test_tree(&reader, MAX_KEYS_PER_DOMAIN);
+
+        let root = snapshot.bags.get("root").expect("root missing");
+
+        assert!(matches!(
+            root.values.get("TestValue"),
+            Some(ValueReadResult::Failure(ReadError::AccessDenied { .. }))
+        ));
+
+        assert_eq!(root.read_errors.len(), 1);
+
+        let error = &root.read_errors[0];
+
+        assert_eq!(error.operation, "get_value");
+        assert_eq!(error.root, RootKey::Hkcu);
+        assert_eq!(error.key_path, "root");
+        assert!(error.error.contains("TestValue"));
+
+        let child = root.subkeys.get(r"root\child").expect("child missing");
+
+        assert!(matches!(
+            child.values.get("TestValue"),
+            Some(ValueReadResult::Success(_))
+        ));
+
+        assert_eq!(count_snapshot_read_errors(&snapshot), 1);
+
+        assert!(matches!(snapshot.status, InspectionStatus::Partial { .. }));
+    }
+
+    #[test]
+    fn enumerated_missing_value_is_reported() {
+        let reader = build_hierarchy(0).with_value_failure(
+            "root",
+            "TestValue",
+            InjectedValueFailure::ValueNotFound,
+        );
+
+        let (snapshot, _) = inspect_test_tree(&reader, MAX_KEYS_PER_DOMAIN);
+
+        let root = snapshot.bags.get("root").expect("root missing");
+
+        assert!(matches!(
+            root.values.get("TestValue"),
+            Some(ValueReadResult::Failure(ReadError::ValueNotFound { .. }))
+        ));
+
+        assert_eq!(root.read_errors.len(), 1);
+
+        let error = &root.read_errors[0];
+
+        assert_eq!(error.operation, "get_value");
+        assert_eq!(error.root, RootKey::Hkcu);
+        assert_eq!(error.key_path, "root");
+
+        assert_eq!(count_snapshot_read_errors(&snapshot), 1);
+
+        assert!(!matches!(snapshot.status, InspectionStatus::Complete));
+    }
+
+    #[test]
+    fn advanced_missing_optional_values_are_not_errors() {
+        use winview_core::registry::keys::advanced_values::HIDE_FILE_EXT;
+        use winview_core::registry::keys::advanced_values::USE_COMPACT_MODE;
+        use winview_core::registry::keys::paths::ADVANCED;
+        use winview_core::test_support::FakeRegistryReader;
+
+        let reader = FakeRegistryReader::new();
+        reader.insert_value(
+            RootKey::Hkcu,
+            ADVANCED,
+            HIDE_FILE_EXT,
+            4,
+            42u32.to_le_bytes().to_vec(),
+            Some(RegistryValue::Dword(42)),
+        );
+
+        let mut snapshot = InspectionSnapshot::default();
+        let mut snapshot_budget = SnapshotBudget::new(MAX_SNAPSHOT_BYTES);
+        inspect_advanced(
+            &reader,
+            &mut snapshot,
+            MAX_VALUE_BYTES,
+            &mut snapshot_budget,
+        );
+        finalize_inspection_status(&mut snapshot);
+
+        let hide_value = snapshot
+            .advanced
+            .values
+            .get(HIDE_FILE_EXT)
+            .expect("HideFileExt missing");
+        match hide_value {
+            ValueReadResult::Success(r) => {
+                assert_eq!(r.raw_bytes, vec![42u8, 0, 0, 0]);
+                assert!(matches!(r.decoded.as_ref(), Some(RegistryValue::Dword(42))));
+            }
+            _ => panic!("expected successful HideFileExt read"),
+        }
+
+        let compact_value = snapshot
+            .advanced
+            .values
+            .get(USE_COMPACT_MODE)
+            .expect("UseCompactMode missing");
+        assert!(matches!(
+            compact_value,
+            ValueReadResult::Failure(ReadError::ValueNotFound { .. })
+        ));
+
+        assert_eq!(snapshot.advanced.read_errors.len(), 0);
+
+        assert_eq!(count_snapshot_read_errors(&snapshot), 0);
+
+        assert!(matches!(snapshot.status, InspectionStatus::Complete));
+    }
+
+    #[test]
+    fn advanced_access_denied_is_reported() {
+        use winview_core::registry::keys::advanced_values::AUTO_CHECK_SELECT;
+        use winview_core::registry::keys::advanced_values::HIDE_FILE_EXT;
+        use winview_core::registry::keys::advanced_values::USE_COMPACT_MODE;
+        use winview_core::registry::keys::paths::ADVANCED;
+
+        let mut data = BTreeMap::new();
+        data.insert(ADVANCED.to_string(), vec![]);
+
+        let mut values = BTreeMap::new();
+        let mut adv_values = BTreeMap::new();
+        adv_values.insert(
+            USE_COMPACT_MODE.to_string(),
+            (
+                4,
+                42u32.to_le_bytes().to_vec(),
+                Some(RegistryValue::Dword(42)),
+                DecodingStatus::Decoded,
+            ),
+        );
+        values.insert(ADVANCED.to_string(), adv_values);
+
+        let reader = FakeReader::with_values(data, values).with_value_failure(
+            ADVANCED,
+            HIDE_FILE_EXT,
+            InjectedValueFailure::AccessDenied,
+        );
+
+        let mut snapshot = InspectionSnapshot::default();
+        let mut snapshot_budget = SnapshotBudget::new(MAX_SNAPSHOT_BYTES);
+        inspect_advanced(
+            &reader,
+            &mut snapshot,
+            MAX_VALUE_BYTES,
+            &mut snapshot_budget,
+        );
+        finalize_inspection_status(&mut snapshot);
+
+        let hide_value = snapshot
+            .advanced
+            .values
+            .get(HIDE_FILE_EXT)
+            .expect("HideFileExt missing");
+        assert!(matches!(
+            hide_value,
+            ValueReadResult::Failure(ReadError::AccessDenied { .. })
+        ));
+
+        let compact_value = snapshot
+            .advanced
+            .values
+            .get(USE_COMPACT_MODE)
+            .expect("UseCompactMode missing");
+        match compact_value {
+            ValueReadResult::Success(r) => {
+                assert_eq!(r.raw_bytes, vec![42u8, 0, 0, 0]);
+                assert!(matches!(r.decoded.as_ref(), Some(RegistryValue::Dword(42))));
+            }
+            _ => panic!("expected successful UseCompactMode read"),
+        }
+
+        // Other absent optional settings (AUTO_CHECK_SELECT etc.) should not
+        // produce inspection errors since they are ValueNotFound + optional.
+        let absent_value = snapshot
+            .advanced
+            .values
+            .get(AUTO_CHECK_SELECT)
+            .expect("AUTO_CHECK_SELECT missing");
+        assert!(matches!(
+            absent_value,
+            ValueReadResult::Failure(ReadError::ValueNotFound { .. })
+        ));
+
+        assert_eq!(snapshot.advanced.read_errors.len(), 1);
+
+        let error = &snapshot.advanced.read_errors[0];
+
+        assert_eq!(error.operation, "get_value");
+        assert_eq!(error.root, RootKey::Hkcu);
+        assert_eq!(error.key_path, ADVANCED);
+        assert!(error.error.contains(HIDE_FILE_EXT));
+
+        assert_eq!(count_snapshot_read_errors(&snapshot), 1);
+
+        assert!(matches!(snapshot.status, InspectionStatus::Partial { .. }));
+    }
+
+    #[test]
+    fn folder_type_value_access_denied_is_reported() {
+        let reader = build_folder_types_fixture(None, false).with_value_failure(
+            &format!(
+                r"{}\{}\TopViews\{}",
+                TEST_FOLDER_TYPES, TEST_FOLDER_GUID, TEST_VIEW_GUID
+            ),
+            "Mode",
+            InjectedValueFailure::AccessDenied,
+        );
+
+        let mut snapshot = InspectionSnapshot::default();
+        let mut snapshot_budget = SnapshotBudget::new(MAX_SNAPSHOT_BYTES);
+
+        inspect_folder_types_hive(
+            &reader,
+            RootKey::Hkcu,
+            TEST_FOLDER_TYPES,
+            ObservationSource::HkcuFolderTypes,
+            &mut snapshot.hkcu_folder_types,
+            MAX_VALUE_BYTES,
+            &mut snapshot_budget,
+        );
+
+        finalize_inspection_status(&mut snapshot);
+
+        let folder = snapshot
+            .hkcu_folder_types
+            .types
+            .get(TEST_FOLDER_GUID)
+            .expect("folder type missing");
+
+        let view = folder.top_views.get(TEST_VIEW_GUID).expect("view missing");
+
+        assert!(matches!(
+            view.raw_values.get("Mode"),
+            Some(ValueReadResult::Failure(ReadError::AccessDenied { .. }))
+        ));
+        assert_eq!(view.mode, None);
+
+        // Other missing optional settings should not be counted as errors.
+        assert!(view.logical_view_mode.is_none());
+        assert!(view.icon_size.is_none());
+
+        assert_eq!(snapshot.hkcu_folder_types.read_errors.len(), 1);
+
+        let error = &snapshot.hkcu_folder_types.read_errors[0];
+
+        assert_eq!(error.operation, "get_value");
+        assert_eq!(error.root, RootKey::Hkcu);
+        assert_eq!(
+            error.key_path,
+            format!(
+                r"{}\{}\TopViews\{}",
+                TEST_FOLDER_TYPES, TEST_FOLDER_GUID, TEST_VIEW_GUID
+            )
+        );
+        assert!(error.error.contains("Mode"));
+
+        assert_eq!(count_snapshot_read_errors(&snapshot), 1);
+
+        assert!(matches!(snapshot.status, InspectionStatus::Partial { .. }));
+    }
+
+    #[test]
+    fn canonical_name_access_denied_preserves_view_data() {
+        use winview_core::registry::keys::paths::*;
+
+        let reader = build_folder_types_fixture(Some("GeneralItems"), false).with_value_failure(
+            &format!(r"{}\{}", TEST_FOLDER_TYPES, TEST_FOLDER_GUID),
+            CANONICAL_NAME,
+            InjectedValueFailure::AccessDenied,
+        );
+
+        let mut snapshot = InspectionSnapshot::default();
+        let mut snapshot_budget = SnapshotBudget::new(MAX_SNAPSHOT_BYTES);
+
+        inspect_folder_types_hive(
+            &reader,
+            RootKey::Hkcu,
+            TEST_FOLDER_TYPES,
+            ObservationSource::HkcuFolderTypes,
+            &mut snapshot.hkcu_folder_types,
+            MAX_VALUE_BYTES,
+            &mut snapshot_budget,
+        );
+
+        finalize_inspection_status(&mut snapshot);
+
+        let folder = snapshot
+            .hkcu_folder_types
+            .types
+            .get(TEST_FOLDER_GUID)
+            .expect("folder type missing");
+
+        assert_eq!(folder.canonical_name, None);
+
+        let view = folder.top_views.get(TEST_VIEW_GUID).expect("view missing");
+
+        assert_eq!(view.mode, Some(42));
+
+        assert_eq!(snapshot.hkcu_folder_types.read_errors.len(), 1);
+
+        let error = &snapshot.hkcu_folder_types.read_errors[0];
+
+        assert_eq!(error.operation, "get_value");
+        assert_eq!(error.root, RootKey::Hkcu);
+        assert_eq!(
+            error.key_path,
+            format!(r"{}\{}", TEST_FOLDER_TYPES, TEST_FOLDER_GUID)
+        );
+        assert!(error.error.contains(CANONICAL_NAME));
+
+        assert_eq!(count_snapshot_read_errors(&snapshot), 1);
+
+        assert!(matches!(snapshot.status, InspectionStatus::Partial { .. }));
     }
 }
