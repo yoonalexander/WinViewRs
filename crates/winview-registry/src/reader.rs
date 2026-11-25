@@ -3,6 +3,9 @@
 use crate::version::detect_windows_version;
 use std::collections::BTreeMap;
 use std::ops::Deref;
+use windows::core::PWSTR;
+use windows::Win32::Foundation::{ERROR_NO_MORE_ITEMS, ERROR_SUCCESS, WIN32_ERROR};
+use windows::Win32::System::Registry::{RegEnumKeyExW, RegEnumValueW, HKEY};
 use windows_registry::{Key, Type as RegType, CURRENT_USER, LOCAL_MACHINE};
 use winview_core::model::{
     DecodingStatus, FolderTypeSnapshot, FolderTypesSnapshot, InspectionError, InspectionSnapshot,
@@ -11,6 +14,9 @@ use winview_core::model::{
 };
 use winview_core::registry::keys::{RootKey, ValueTypeName};
 use winview_core::registry::traits::{RegistryError, RegistryKey, RegistryReader, RegistryResult};
+
+const MAX_SUBKEY_NAME_UNITS: usize = 256;
+const MAX_VALUE_NAME_UNITS: usize = 16_384;
 
 fn registry_error_to_read_error(error: &RegistryError) -> ReadError {
     match error {
@@ -226,6 +232,75 @@ impl RegistryReader for WindowsRegistryReader {
     }
 }
 
+fn decode_enumerated_name(
+    status: WIN32_ERROR,
+    buffer: &[u16],
+    length: u32,
+    root: RootKey,
+    path: &str,
+    operation: &str,
+    index: u32,
+) -> RegistryResult<Option<String>> {
+    if status == ERROR_NO_MORE_ITEMS {
+        return Ok(None);
+    }
+
+    if status != ERROR_SUCCESS {
+        return Err(RegistryError::WindowsApi(format!(
+            "{} failed at {:?}\\{} index {}: \
+                 Win32 error {}",
+            operation, root, path, index, status.0,
+        )));
+    }
+
+    let length = length as usize;
+
+    if length >= buffer.len() {
+        return Err(RegistryError::InvalidData(format!(
+            "{} returned invalid name length {} \
+                 at {:?}\\{} index {}",
+            operation, length, root, path, index,
+        )));
+    }
+
+    let units = &buffer[..length];
+
+    if units.contains(&0) {
+        return Err(RegistryError::InvalidData(format!(
+            "{} returned an embedded null \
+                 at {:?}\\{} index {}",
+            operation, root, path, index,
+        )));
+    }
+
+    let name = String::from_utf16(units).map_err(|_| {
+        RegistryError::InvalidData(format!(
+            "{} returned invalid UTF-16 \
+                     at {:?}\\{} index {}",
+            operation, root, path, index,
+        ))
+    })?;
+
+    Ok(Some(name))
+}
+
+fn collect_registry_entries<T>(
+    mut read_entry: impl FnMut(u32) -> RegistryResult<Option<T>>,
+) -> RegistryResult<Vec<T>> {
+    let mut entries = Vec::new();
+
+    for index in 0..=u32::MAX {
+        match read_entry(index)? {
+            Some(entry) => entries.push(entry),
+            None => return Ok(entries),
+        }
+    }
+
+    Err(RegistryError::InvalidData(
+        "Registry enumeration index exhausted".into(),
+    ))
+}
+
 struct WindowsRegistryKey {
     key: Key,
     root: RootKey,
@@ -234,30 +309,84 @@ struct WindowsRegistryKey {
 
 impl RegistryKey for WindowsRegistryKey {
     fn enum_values(&self) -> RegistryResult<Vec<(String, ValueTypeName)>> {
-        let iter = self
-            .key
-            .values()
-            .map_err(|e| RegistryError::WindowsApi(e.to_string()))?;
+        let handle = HKEY(self.key.as_raw());
 
-        let mut results = Vec::new();
-        for (name, value) in iter {
-            let type_name = convert_type(value.ty());
-            results.push((name, type_name));
-        }
-        Ok(results)
+        let mut buffer = vec![0u16; MAX_VALUE_NAME_UNITS];
+
+        collect_registry_entries(|index| {
+            let mut length = buffer.len() as u32;
+            let mut raw_type = 0u32;
+
+            // SAFETY:
+            // The borrowed registry handle remains
+            // valid for this synchronous call.
+            // All output pointers reference valid,
+            // writable storage.
+            // Value payload retrieval is disabled.
+            let status = unsafe {
+                RegEnumValueW(
+                    handle,
+                    index,
+                    Some(PWSTR(buffer.as_mut_ptr())),
+                    &mut length,
+                    None,
+                    Some(&mut raw_type),
+                    None,
+                    None,
+                )
+            };
+
+            let name = decode_enumerated_name(
+                status,
+                &buffer,
+                length,
+                self.root,
+                &self.path,
+                "RegEnumValueW",
+                index,
+            )?;
+
+            Ok(name.map(|name| (name, convert_type(RegType::from(raw_type)))))
+        })
     }
 
     fn enum_subkeys(&self) -> RegistryResult<Vec<String>> {
-        let iter = self
-            .key
-            .keys()
-            .map_err(|e| RegistryError::WindowsApi(e.to_string()))?;
+        let handle = HKEY(self.key.as_raw());
 
-        let mut results = Vec::new();
-        for name in iter {
-            results.push(name);
-        }
-        Ok(results)
+        let mut buffer = vec![0u16; MAX_SUBKEY_NAME_UNITS];
+
+        collect_registry_entries(|index| {
+            let mut length = buffer.len() as u32;
+
+            // SAFETY:
+            // The borrowed registry handle remains
+            // valid for this synchronous call.
+            // The UTF-16 buffer and length pointer
+            // are writable and correctly sized.
+            // Unused optional pointers are null.
+            let status = unsafe {
+                RegEnumKeyExW(
+                    handle,
+                    index,
+                    Some(PWSTR(buffer.as_mut_ptr())),
+                    &mut length,
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+            };
+
+            decode_enumerated_name(
+                status,
+                &buffer,
+                length,
+                self.root,
+                &self.path,
+                "RegEnumKeyExW",
+                index,
+            )
+        })
     }
 
     fn get_value(
@@ -5889,6 +6018,162 @@ mod depth_tests {
 
                 assert!(opened.iter().all(|(root, _)| { *root == RootKey::Hkcu }));
             }
+        }
+    }
+
+    #[test]
+    fn native_enumeration_collects_entries_until_end() {
+        let mut visited = Vec::new();
+
+        let entries = collect_registry_entries(|index| {
+            visited.push(index);
+
+            match index {
+                0 => Ok(Some("First")),
+                1 => Ok(Some("Second")),
+                2 => Ok(None),
+                _ => panic!("Enumeration continued after termination"),
+            }
+        })
+        .unwrap();
+
+        assert_eq!(entries, vec!["First", "Second"]);
+
+        assert_eq!(visited, vec![0, 1, 2]);
+
+        let empty = collect_registry_entries(|_| Ok(None::<String>)).unwrap();
+
+        assert!(empty.is_empty());
+    }
+
+    #[test]
+    fn native_enumeration_propagates_midstream_errors() {
+        let mut visited = Vec::new();
+
+        let result = collect_registry_entries(|index| {
+            visited.push(index);
+
+            match index {
+                0 => Ok(Some("First")),
+                1 => Err(RegistryError::WindowsApi(
+                    "injected enumeration failure".into(),
+                )),
+                _ => panic!("Enumeration continued after failure"),
+            }
+        });
+
+        assert!(matches!(
+            result,
+            Err(RegistryError::WindowsApi(message))
+                if message == "injected enumeration failure"
+        ));
+
+        assert_eq!(visited, vec![0, 1]);
+    }
+
+    #[test]
+    fn native_enumeration_distinguishes_end_from_error() {
+        let buffer = [65u16, 0];
+
+        let ended = decode_enumerated_name(
+            ERROR_NO_MORE_ITEMS,
+            &buffer,
+            u32::MAX,
+            RootKey::Hkcu,
+            "Software\\Test",
+            "RegEnumValueW",
+            7,
+        )
+        .unwrap();
+
+        assert!(ended.is_none());
+
+        for code in [
+            2u32, // FILE_NOT_FOUND
+            5,    // ACCESS_DENIED
+            6,    // INVALID_HANDLE
+            234,  // MORE_DATA
+            1018, // KEY_DELETED
+        ] {
+            let error = decode_enumerated_name(
+                WIN32_ERROR(code),
+                &buffer,
+                1,
+                RootKey::Hkcu,
+                "Software\\Test",
+                "RegEnumValueW",
+                7,
+            )
+            .unwrap_err();
+
+            match error {
+                RegistryError::WindowsApi(message) => {
+                    assert!(message.contains("RegEnumValueW"));
+
+                    assert!(message.contains("Software\\Test"));
+
+                    assert!(message.contains("Hkcu"));
+
+                    assert!(message.contains("index 7"));
+
+                    assert!(message.contains(&format!("Win32 error {code}")));
+                }
+                other => panic!("Unexpected error: {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn native_enumeration_preserves_unicode_and_default_names() {
+        for expected in ["", "Mode", "안녕하세요", "Explorer 😀"] {
+            let units: Vec<u16> = expected.encode_utf16().chain(std::iter::once(0)).collect();
+
+            let result = decode_enumerated_name(
+                ERROR_SUCCESS,
+                &units,
+                (units.len() - 1) as u32,
+                RootKey::Hkcu,
+                "Software\\Test",
+                "RegEnumValueW",
+                0,
+            )
+            .unwrap();
+
+            assert_eq!(result.as_deref(), Some(expected));
+        }
+    }
+
+    #[test]
+    fn native_enumeration_rejects_invalid_names() {
+        let cases = [
+            (vec![65u16, 0], 2u32),
+            (vec![65, 0], u32::MAX),
+            (vec![0xD800, 0], 1),
+            (vec![0xDC00, 0], 1),
+            (vec![65, 0, 66, 0], 3),
+        ];
+
+        for (buffer, length) in cases {
+            let result = decode_enumerated_name(
+                ERROR_SUCCESS,
+                &buffer,
+                length,
+                RootKey::Hkcu,
+                "Software\\Test",
+                "RegEnumValueW",
+                0,
+            );
+
+            assert!(matches!(result, Err(RegistryError::InvalidData(_))));
+        }
+    }
+
+    #[test]
+    fn native_enumeration_preserves_raw_type_ids() {
+        for raw_type in [0u32, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 999, u32::MAX] {
+            let converted = convert_type(RegType::from(raw_type));
+
+            assert_eq!(converted.to_raw_id(), raw_type);
         }
     }
 }
