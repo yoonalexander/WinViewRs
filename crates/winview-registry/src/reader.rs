@@ -4646,4 +4646,137 @@ mod depth_tests {
 
         assert!(matches!(status, DecodingStatus::Malformed { .. }));
     }
+
+    #[test]
+    fn utf16_decodes_null_terminated_strings() {
+        let mut units: Vec<u16> = "GeneralItems".encode_utf16().collect();
+
+        units.push(0);
+
+        let bytes = utf16_units_to_bytes(&units);
+
+        assert_eq!(decode_utf16_le(&bytes).unwrap(), "GeneralItems");
+    }
+
+    #[test]
+    fn utf16_decodes_unicode_and_surrogate_pairs() {
+        for text in ["안녕하세요", "こんにちは", "你好", "Explorer 😀", "Café"] {
+            let mut units: Vec<u16> = text.encode_utf16().collect();
+
+            units.push(0);
+
+            let bytes = utf16_units_to_bytes(&units);
+
+            assert_eq!(decode_utf16_le(&bytes).unwrap(), text);
+        }
+    }
+
+    #[test]
+    fn utf16_accepts_empty_and_unterminated_strings() {
+        assert_eq!(decode_utf16_le(&[]).unwrap(), "");
+
+        let empty = utf16_units_to_bytes(&[0]);
+
+        assert_eq!(decode_utf16_le(&empty).unwrap(), "");
+
+        let unterminated = utf16_units_to_bytes(&[65, 66, 67]);
+
+        assert_eq!(decode_utf16_le(&unterminated).unwrap(), "ABC");
+    }
+
+    #[test]
+    fn utf16_stops_at_first_null() {
+        let bytes = utf16_units_to_bytes(&[65, 66, 0, 67, 68, 0]);
+
+        assert_eq!(decode_utf16_le(&bytes).unwrap(), "AB");
+
+        let starts_with_null = utf16_units_to_bytes(&[0, 65, 66]);
+
+        assert_eq!(decode_utf16_le(&starts_with_null).unwrap(), "");
+    }
+
+    #[test]
+    fn utf16_rejects_invalid_encoding() {
+        assert!(decode_utf16_le(&[65]).is_err());
+
+        assert!(decode_utf16_le(&[65, 0, 66]).is_err());
+
+        for units in [
+            vec![0xD800, 0],
+            vec![0xDC00, 0],
+            vec![0xD800, 65, 0],
+            vec![65, 0xDC00, 0],
+        ] {
+            let bytes = utf16_units_to_bytes(&units);
+
+            assert!(decode_utf16_le(&bytes).is_err());
+        }
+    }
+
+    #[test]
+    fn reg_sz_conversion_preserves_raw_bytes() {
+        let bytes = utf16_units_to_bytes(&[65, 66, 0, 67, 68, 0]);
+
+        let (type_name, decoded, raw, status) = convert_registry_value(RegType::String, &bytes);
+
+        assert_eq!(type_name, ValueTypeName::RegSz);
+
+        assert_eq!(type_name.to_raw_id(), 1);
+
+        assert_eq!(decoded, RegistryValue::String("AB".into()));
+
+        assert_eq!(raw, bytes);
+
+        assert_eq!(status, DecodingStatus::Decoded);
+    }
+
+    #[test]
+    fn reg_expand_sz_preserves_environment_variables() {
+        let text = r"%USERPROFILE%\Documents";
+
+        let mut units: Vec<u16> = text.encode_utf16().collect();
+
+        units.push(0);
+
+        let bytes = utf16_units_to_bytes(&units);
+
+        let (type_name, decoded, raw, status) =
+            convert_registry_value(RegType::ExpandString, &bytes);
+
+        assert_eq!(type_name, ValueTypeName::RegExpandSz);
+
+        assert_eq!(type_name.to_raw_id(), 2);
+
+        assert_eq!(decoded, RegistryValue::ExpandString(text.to_string()));
+
+        assert_eq!(raw, bytes);
+
+        assert_eq!(status, DecodingStatus::Decoded);
+    }
+
+    #[test]
+    fn malformed_registry_strings_preserve_raw_bytes() {
+        let malformed_payloads = [
+            vec![65, 0, 66],
+            utf16_units_to_bytes(&[0xD800, 0]),
+            utf16_units_to_bytes(&[0xDC00, 0]),
+        ];
+
+        for bytes in malformed_payloads {
+            for (reg_type, expected_type) in [
+                (RegType::String, ValueTypeName::RegSz),
+                (RegType::ExpandString, ValueTypeName::RegExpandSz),
+            ] {
+                let (type_name, fallback, raw, status) = convert_registry_value(reg_type, &bytes);
+
+                assert_eq!(type_name, expected_type);
+
+                assert_eq!(raw, bytes);
+
+                assert_eq!(fallback, RegistryValue::Binary(bytes.clone()));
+
+                assert!(matches!(status, DecodingStatus::Malformed { .. }));
+            }
+        }
+    }
 }
