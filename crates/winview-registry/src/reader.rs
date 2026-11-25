@@ -432,62 +432,47 @@ fn decode_utf16_le(data: &[u8]) -> Result<String, String> {
     String::from_utf16(valid).map_err(|_| "Invalid UTF-16 sequence".to_string())
 }
 
-/// Dedicated REG_MULTI_SZ decoder — preserves all elements including empty strings
-/// Windows semantics: double-null terminates; single-null separates; empty multi-string = zero-length (no strings)
+/// Decodes a UTF-16LE REG_MULTI_SZ sequence.
+/// An empty string terminates the sequence.
+/// Original registry bytes are preserved by the caller.
 fn decode_reg_multi_sz(data: &[u8]) -> Result<Vec<String>, String> {
     if !data.len().is_multiple_of(2) {
         return Err("Odd byte length for REG_MULTI_SZ".into());
     }
-    let u16s: Vec<u16> = data
+
+    let units: Vec<u16> = data
         .as_chunks::<2>()
         .0
         .iter()
         .map(|c| u16::from_le_bytes([c[0], c[1]]))
         .collect();
 
-    let mut result = Vec::new();
-    let mut current = Vec::new();
-    let mut i = 0;
-
-    // Empty buffer = empty multi-string
-    if u16s.is_empty() {
+    // Preserve existing compatibility with empty payloads.
+    if units.is_empty() {
         return Ok(Vec::new());
     }
 
-    while i < u16s.len() {
-        let c = u16s[i];
-        if c == 0 {
-            // Null terminator - check for double-null (end of multi-string)
-            if i + 1 < u16s.len() && u16s[i + 1] == 0 {
-                // Double null - end of REG_MULTI_SZ
-                // Push the current string (may be empty)
-                result.push(
-                    String::from_utf16(&current)
-                        .map_err(|_| "Invalid UTF-16 in multi-string element".to_string())?,
-                );
-                break;
-            } else {
-                // Single null - separator between strings
-                result.push(
-                    String::from_utf16(&current)
-                        .map_err(|_| "Invalid UTF-16 in multi-string element".to_string())?,
-                );
-                current.clear();
-                i += 1;
-                continue;
-            }
+    let mut result = Vec::new();
+    let mut start = 0;
+
+    for (index, &unit) in units.iter().enumerate() {
+        if unit != 0 {
+            continue;
         }
-        current.push(c);
-        i += 1;
+
+        // An empty element terminates the sequence.
+        if index == start {
+            return Ok(result);
+        }
+
+        let element = String::from_utf16(&units[start..index])
+            .map_err(|_| "Invalid UTF-16 in multi-string element".to_string())?;
+
+        result.push(element);
+        start = index + 1;
     }
 
-    // If we exited without double-null, the data is malformed
-    if i >= u16s.len() {
-        return Err("Missing double-null terminator".into());
-    }
-
-    // Trailing data after double-null is ignored per Windows behavior
-    Ok(result)
+    Err("Missing REG_MULTI_SZ sequence terminator".into())
 }
 
 // Inspection modules - collect errors instead of failing
@@ -4556,5 +4541,109 @@ mod depth_tests {
         assert_eq!(count_snapshot_read_errors(&snapshot), 1);
 
         assert!(matches!(snapshot.status, InspectionStatus::Partial { .. }));
+    }
+
+    fn utf16_units_to_bytes(units: &[u16]) -> Vec<u8> {
+        units.iter().flat_map(|unit| unit.to_le_bytes()).collect()
+    }
+
+    #[test]
+    fn multi_sz_empty_sequences() {
+        for units in [vec![], vec![0], vec![0, 0]] {
+            let bytes = utf16_units_to_bytes(&units);
+
+            assert_eq!(decode_reg_multi_sz(&bytes).unwrap(), Vec::<String>::new());
+        }
+    }
+
+    #[test]
+    fn multi_sz_single_element() {
+        let bytes = utf16_units_to_bytes(&[65, 0, 0]);
+
+        assert_eq!(decode_reg_multi_sz(&bytes).unwrap(), vec!["A".to_string()]);
+    }
+
+    #[test]
+    fn multi_sz_multiple_unicode_elements() {
+        let mut units: Vec<u16> = "First".encode_utf16().collect();
+
+        units.push(0);
+        units.extend("안녕하세요".encode_utf16());
+        units.push(0);
+        units.extend("😀".encode_utf16());
+        units.extend([0, 0]);
+
+        let bytes = utf16_units_to_bytes(&units);
+
+        assert_eq!(
+            decode_reg_multi_sz(&bytes).unwrap(),
+            vec![
+                "First".to_string(),
+                "안녕하세요".to_string(),
+                "😀".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn multi_sz_rejects_missing_terminator() {
+        for units in [vec![65], vec![65, 0], vec![65, 0, 66, 0]] {
+            let bytes = utf16_units_to_bytes(&units);
+
+            assert!(decode_reg_multi_sz(&bytes).is_err());
+        }
+    }
+
+    #[test]
+    fn multi_sz_rejects_invalid_encoding() {
+        // Odd byte length.
+        assert!(decode_reg_multi_sz(&[65, 0, 0]).is_err());
+
+        // Unpaired UTF-16 high surrogate.
+        let invalid_high = utf16_units_to_bytes(&[0xD800, 0, 0]);
+
+        assert!(decode_reg_multi_sz(&invalid_high).is_err());
+
+        // Unpaired UTF-16 low surrogate.
+        let invalid_low = utf16_units_to_bytes(&[0xDC00, 0, 0]);
+
+        assert!(decode_reg_multi_sz(&invalid_low).is_err());
+    }
+
+    #[test]
+    fn multi_sz_stops_at_empty_element() {
+        let bytes = utf16_units_to_bytes(&[65, 0, 0, 66, 0, 0]);
+
+        assert_eq!(decode_reg_multi_sz(&bytes).unwrap(), vec!["A".to_string()]);
+    }
+
+    #[test]
+    fn multi_sz_conversion_preserves_raw_bytes() {
+        let valid = utf16_units_to_bytes(&[65, 0, 66, 0, 0]);
+
+        let (type_name, decoded, raw, status) =
+            convert_registry_value(RegType::MultiString, &valid);
+
+        assert_eq!(type_name, ValueTypeName::RegMultiSz);
+        assert_eq!(raw, valid);
+
+        assert_eq!(
+            decoded,
+            RegistryValue::MultiString(vec!["A".to_string(), "B".to_string(),])
+        );
+
+        assert_eq!(status, DecodingStatus::Decoded);
+
+        let malformed = utf16_units_to_bytes(&[65, 0]);
+
+        let (type_name, fallback, raw, status) =
+            convert_registry_value(RegType::MultiString, &malformed);
+
+        assert_eq!(type_name, ValueTypeName::RegMultiSz);
+        assert_eq!(raw, malformed);
+
+        assert_eq!(fallback, RegistryValue::Binary(malformed));
+
+        assert!(matches!(status, DecodingStatus::Malformed { .. }));
     }
 }
