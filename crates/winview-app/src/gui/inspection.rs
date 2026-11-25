@@ -6,12 +6,14 @@ use winview_core::inspection::count_snapshot_read_errors;
 
 use winview_core::model::InspectionSnapshot;
 
+use super::folder_types::FolderTypesIndex;
 use super::overview::InspectionOverview;
 
 pub(super) struct CapturedInspection {
     pub(super) snapshot: InspectionSnapshot,
     pub(super) error_count: usize,
     pub(super) overview: InspectionOverview,
+    pub(super) folder_index: FolderTypesIndex,
 }
 
 #[derive(Default)]
@@ -48,10 +50,13 @@ impl InspectionState {
 
                 let overview = InspectionOverview::from_snapshot(&snapshot);
 
+                let folder_index = FolderTypesIndex::from_snapshot(&snapshot);
+
                 Ok(CapturedInspection {
                     snapshot,
                     error_count,
                     overview,
+                    folder_index,
                 })
             });
 

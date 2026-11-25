@@ -156,7 +156,13 @@ Current GUI state:
 - Inspection status (Complete, Partial, Failed) and recorded error count displayed.
 - Windows product name, build, UBR, detection method, and capture timestamp shown.
 - Per-domain record and error summaries (7 domains).
-- Detailed registry browsing remains unimplemented.
+- FolderTypes navigation with separate system-level (HKLM) and user-level (HKCU) records.
+- Paginated folder-type browsing (25 records per page).
+- Canonical names and GUIDs displayed for each folder type.
+- Captured TopViews settings shown per view (LogicalViewMode, Mode, IconSize, GroupBy, etc.).
+- Explicit distinction between unavailable values and captured values (including empty strings).
+- These records are captured registry snapshots, not necessarily the effective settings Explorer applies.
+- Advanced settings and other registry-domain detail browsers remain unimplemented.
 - No configuration editing is supported.
 
 ## Known limitations

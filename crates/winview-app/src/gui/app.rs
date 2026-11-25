@@ -8,11 +8,21 @@ use winview_core::RegistryReader;
 
 use super::inspection::InspectionState;
 
+use super::folder_types::FolderBrowser;
 use super::overview::show_overview;
+
+#[derive(Default, PartialEq, Eq)]
+enum InspectorPage {
+    #[default]
+    Overview,
+    FolderTypes,
+}
 
 #[derive(Default)]
 pub struct WinViewApp {
     inspection: InspectionState,
+    page: InspectorPage,
+    folder_browser: FolderBrowser,
 }
 
 impl eframe::App for WinViewApp {
@@ -43,12 +53,15 @@ impl eframe::App for WinViewApp {
             if ui
                 .add_enabled(!loading, egui::Button::new(button_label))
                 .clicked()
-            {
-                self.inspection.start(|| {
+                && self.inspection.start(|| {
                     let reader = winview_registry::WindowsRegistryReader;
 
                     reader.inspect_all().map_err(|error| error.to_string())
-                });
+                })
+            {
+                self.folder_browser = FolderBrowser::default();
+
+                self.page = InspectorPage::Overview;
             }
 
             ui.add_space(8.0);
@@ -92,11 +105,37 @@ impl eframe::App for WinViewApp {
                         result.error_count
                     ));
 
-                    egui::ScrollArea::vertical()
-                        .id_salt("inspection_overview_scroll")
-                        .show(ui, |ui| {
-                            show_overview(ui, &result.overview);
-                        });
+                    ui.horizontal(|ui| {
+                        ui.selectable_value(&mut self.page, InspectorPage::Overview, "Overview");
+
+                        ui.selectable_value(
+                            &mut self.page,
+                            InspectorPage::FolderTypes,
+                            "FolderTypes",
+                        );
+                    });
+
+                    match self.page {
+                        InspectorPage::Overview => {
+                            egui::ScrollArea::vertical()
+                                .id_salt("inspection_overview_scroll")
+                                .show(ui, |ui| {
+                                    show_overview(ui, &result.overview);
+                                });
+                        }
+
+                        InspectorPage::FolderTypes => {
+                            egui::ScrollArea::vertical()
+                                .id_salt("folder_types_scroll")
+                                .show(ui, |ui| {
+                                    self.folder_browser.show(
+                                        ui,
+                                        &result.snapshot,
+                                        &result.folder_index,
+                                    );
+                                });
+                        }
+                    }
                 }
 
                 InspectionState::Error(error) => {
