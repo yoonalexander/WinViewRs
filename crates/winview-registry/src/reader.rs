@@ -522,6 +522,9 @@ fn inspect_folder_types_hive(
     let key_result = reader.open_key(root, path);
     let key = match key_result {
         Ok(k) => k,
+        Err(RegistryError::KeyNotFound { .. }) if matches!(root, RootKey::Hkcu) => {
+            return;
+        }
         Err(e) => {
             folder_types.read_errors.push(InspectionError {
                 key_path: path.to_string(),
@@ -620,12 +623,24 @@ fn inspect_folder_types_hive(
         let top_views_key = match top_views_key_result {
             Ok(k) => k,
             Err(e) => {
-                folder_types.read_errors.push(InspectionError {
-                    key_path: top_views_path,
-                    root,
-                    operation: "open_key".to_string(),
-                    error: e.to_string(),
-                });
+                if !matches!(e, RegistryError::KeyNotFound { .. }) {
+                    folder_types.read_errors.push(InspectionError {
+                        key_path: top_views_path,
+                        root,
+                        operation: "open_key".to_string(),
+                        error: e.to_string(),
+                    });
+                }
+
+                let folder_type_snapshot = FolderTypeSnapshot {
+                    guid: guid.clone(),
+                    canonical_name,
+                    top_views: BTreeMap::new(),
+                    read_errors: Vec::new(),
+                };
+
+                folder_types.types.insert(guid, folder_type_snapshot);
+
                 continue;
             }
         };
@@ -918,6 +933,9 @@ fn inspect_advanced(
     let key_result = reader.open_key(RootKey::Hkcu, ADVANCED);
     let key = match key_result {
         Ok(k) => k,
+        Err(RegistryError::KeyNotFound { .. }) => {
+            return;
+        }
         Err(e) => {
             snapshot.advanced.read_errors.push(InspectionError {
                 key_path: ADVANCED.to_string(),
@@ -1970,6 +1988,40 @@ mod depth_tests {
             0,
             &mut budget,
             &mut snapshot_budget,
+        );
+
+        finalize_inspection_status(&mut snapshot);
+
+        (snapshot, budget)
+    }
+
+    fn inspect_specialized_folder_types(
+        reader: &dyn RegistryReader,
+        root: RootKey,
+    ) -> (InspectionSnapshot, SnapshotBudget) {
+        let mut snapshot = InspectionSnapshot::default();
+
+        let mut budget = SnapshotBudget::new(MAX_SNAPSHOT_BYTES);
+
+        let (source, target) = match root {
+            RootKey::Hkcu => (
+                ObservationSource::HkcuFolderTypes,
+                &mut snapshot.hkcu_folder_types,
+            ),
+            RootKey::Hklm => (
+                ObservationSource::HklmFolderTypes,
+                &mut snapshot.hklm_folder_types,
+            ),
+        };
+
+        inspect_folder_types_hive(
+            reader,
+            root,
+            TEST_FOLDER_TYPES,
+            source,
+            target,
+            MAX_VALUE_BYTES,
+            &mut budget,
         );
 
         finalize_inspection_status(&mut snapshot);
@@ -5188,6 +5240,263 @@ mod depth_tests {
         assert_eq!(root.read_errors.len(), 1);
 
         assert_eq!(root.read_errors[0].operation, "key_limit");
+
+        assert!(matches!(snapshot.status, InspectionStatus::Partial { .. }));
+    }
+
+    #[test]
+    fn folder_types_root_absence_respects_hive_policy() {
+        let reader = FakeReader::new(BTreeMap::new());
+
+        let (hkcu, budget) = inspect_specialized_folder_types(&reader, RootKey::Hkcu);
+
+        assert!(hkcu.hkcu_folder_types.types.is_empty());
+        assert!(hkcu.hkcu_folder_types.read_errors.is_empty());
+
+        assert_eq!(count_snapshot_read_errors(&hkcu), 0);
+
+        assert_eq!(budget.captured_bytes, 0);
+
+        assert!(matches!(hkcu.status, InspectionStatus::Complete));
+
+        let (hklm, budget) = inspect_specialized_folder_types(&reader, RootKey::Hklm);
+
+        assert!(hklm.hklm_folder_types.types.is_empty());
+
+        assert_eq!(hklm.hklm_folder_types.read_errors.len(), 1);
+
+        let error = &hklm.hklm_folder_types.read_errors[0];
+
+        assert_eq!(error.root, RootKey::Hklm);
+        assert_eq!(error.key_path, TEST_FOLDER_TYPES);
+        assert_eq!(error.operation, "open_key");
+        assert_eq!(budget.captured_bytes, 0);
+
+        assert_eq!(count_snapshot_read_errors(&hklm), 1);
+
+        assert!(matches!(hklm.status, InspectionStatus::Failed { .. }));
+    }
+
+    #[test]
+    fn folder_types_root_access_denied_remains_error() {
+        let reader = FakeReader::new(BTreeMap::new()).with_denied_key(TEST_FOLDER_TYPES);
+
+        for root in [RootKey::Hkcu, RootKey::Hklm] {
+            let (snapshot, budget) = inspect_specialized_folder_types(&reader, root);
+
+            let folder_types = match root {
+                RootKey::Hkcu => &snapshot.hkcu_folder_types,
+                RootKey::Hklm => &snapshot.hklm_folder_types,
+            };
+
+            assert!(folder_types.types.is_empty());
+
+            assert_eq!(folder_types.read_errors.len(), 1);
+
+            assert_eq!(folder_types.read_errors[0].root, root);
+
+            assert_eq!(folder_types.read_errors[0].operation, "open_key");
+
+            assert_eq!(count_snapshot_read_errors(&snapshot), 1);
+
+            assert_eq!(budget.captured_bytes, 0);
+
+            assert!(matches!(snapshot.status, InspectionStatus::Failed { .. }));
+        }
+    }
+
+    #[test]
+    fn advanced_root_absence_and_access_denied_are_distinct() {
+        use winview_core::registry::keys::paths::ADVANCED;
+
+        for denied in [false, true] {
+            let reader = FakeReader::new(BTreeMap::new());
+
+            let reader = if denied {
+                reader.with_denied_key(ADVANCED)
+            } else {
+                reader
+            };
+
+            let mut snapshot = InspectionSnapshot::default();
+
+            let mut budget = SnapshotBudget::new(MAX_SNAPSHOT_BYTES);
+
+            inspect_advanced(&reader, &mut snapshot, MAX_VALUE_BYTES, &mut budget);
+
+            finalize_inspection_status(&mut snapshot);
+
+            assert!(snapshot.advanced.values.is_empty());
+            assert!(snapshot.advanced.subkeys.is_empty());
+            assert_eq!(budget.captured_bytes, 0);
+
+            if denied {
+                assert_eq!(snapshot.advanced.read_errors.len(), 1);
+
+                assert_eq!(snapshot.advanced.read_errors[0].operation, "open_key");
+
+                assert!(matches!(snapshot.status, InspectionStatus::Failed { .. }));
+            } else {
+                assert!(snapshot.advanced.read_errors.is_empty());
+
+                assert!(matches!(snapshot.status, InspectionStatus::Complete));
+            }
+        }
+    }
+
+    #[test]
+    fn missing_topviews_preserves_folder_type() {
+        let view_path = format!(
+            r"{}\{}\TopViews\{}",
+            TEST_FOLDER_TYPES, TEST_FOLDER_GUID, TEST_VIEW_GUID,
+        );
+
+        for root in [RootKey::Hkcu, RootKey::Hklm] {
+            for canonical_name in [Some("A"), None] {
+                let mut reader = build_folder_types_fixture(canonical_name, false);
+
+                Arc::make_mut(&mut reader.data).remove(&view_path);
+
+                let (snapshot, budget) = inspect_specialized_folder_types(&reader, root);
+
+                let folder_types = match root {
+                    RootKey::Hkcu => &snapshot.hkcu_folder_types,
+                    RootKey::Hklm => &snapshot.hklm_folder_types,
+                };
+
+                let folder = folder_types
+                    .types
+                    .get(TEST_FOLDER_GUID)
+                    .expect("FolderType discarded");
+
+                assert_eq!(folder.guid, TEST_FOLDER_GUID);
+
+                assert_eq!(folder.canonical_name.as_deref(), canonical_name);
+
+                assert!(folder.top_views.is_empty());
+                assert!(folder.read_errors.is_empty());
+
+                assert_eq!(count_snapshot_read_errors(&snapshot), 0);
+
+                let expected_bytes = if canonical_name.is_some() { 4 } else { 0 };
+
+                assert_eq!(budget.captured_bytes, expected_bytes);
+
+                assert_eq!(
+                    snapshot_has_successful_observations(&snapshot),
+                    canonical_name.is_some()
+                );
+
+                assert!(matches!(snapshot.status, InspectionStatus::Complete));
+            }
+        }
+    }
+
+    #[test]
+    fn denied_topviews_preserves_canonical_name() {
+        let view_path = format!(
+            r"{}\{}\TopViews\{}",
+            TEST_FOLDER_TYPES, TEST_FOLDER_GUID, TEST_VIEW_GUID,
+        );
+
+        let reader = build_folder_types_fixture(Some("A"), false).with_denied_key(&view_path);
+
+        let (snapshot, budget) = inspect_specialized_folder_types(&reader, RootKey::Hkcu);
+
+        let folder = snapshot
+            .hkcu_folder_types
+            .types
+            .get(TEST_FOLDER_GUID)
+            .expect("FolderType discarded");
+
+        assert_eq!(folder.canonical_name.as_deref(), Some("A"));
+
+        assert!(folder.top_views.is_empty());
+
+        assert_eq!(budget.captured_bytes, 4);
+
+        assert_eq!(snapshot.hkcu_folder_types.read_errors.len(), 1);
+
+        let error = &snapshot.hkcu_folder_types.read_errors[0];
+
+        assert_eq!(error.key_path, view_path);
+        assert_eq!(error.operation, "open_key");
+
+        assert_eq!(count_snapshot_read_errors(&snapshot), 1);
+
+        assert!(snapshot_has_successful_observations(&snapshot));
+
+        assert!(matches!(snapshot.status, InspectionStatus::Partial { .. }));
+    }
+
+    #[test]
+    fn denied_topviews_without_observations_is_failed() {
+        let view_path = format!(
+            r"{}\{}\TopViews\{}",
+            TEST_FOLDER_TYPES, TEST_FOLDER_GUID, TEST_VIEW_GUID,
+        );
+
+        let reader = build_folder_types_fixture(None, false).with_denied_key(&view_path);
+
+        let (snapshot, budget) = inspect_specialized_folder_types(&reader, RootKey::Hkcu);
+
+        let folder = snapshot
+            .hkcu_folder_types
+            .types
+            .get(TEST_FOLDER_GUID)
+            .expect("FolderType discarded");
+
+        assert!(folder.canonical_name.is_none());
+        assert!(folder.top_views.is_empty());
+
+        assert_eq!(budget.captured_bytes, 0);
+
+        assert_eq!(count_snapshot_read_errors(&snapshot), 1);
+
+        assert!(!snapshot_has_successful_observations(&snapshot));
+
+        assert!(matches!(snapshot.status, InspectionStatus::Failed { .. }));
+    }
+
+    #[test]
+    fn missing_enumerated_folder_guid_remains_error() {
+        let missing_guid = "{22222222-2222-2222-2222-222222222222}";
+
+        let missing_path = format!(r"{}\{}", TEST_FOLDER_TYPES, missing_guid,);
+
+        let mut reader = build_folder_types_fixture(Some("A"), false);
+
+        Arc::make_mut(&mut reader.data)
+            .get_mut(TEST_FOLDER_TYPES)
+            .unwrap()
+            .insert(0, missing_guid.to_string());
+
+        let (snapshot, budget) = inspect_specialized_folder_types(&reader, RootKey::Hkcu);
+
+        assert!(!snapshot.hkcu_folder_types.types.contains_key(missing_guid));
+
+        let folder = snapshot
+            .hkcu_folder_types
+            .types
+            .get(TEST_FOLDER_GUID)
+            .expect("Later folder was not inspected");
+
+        assert_eq!(folder.canonical_name.as_deref(), Some("A"));
+
+        let view = folder.top_views.get(TEST_VIEW_GUID).expect("View missing");
+
+        assert_eq!(view.mode, Some(42));
+
+        assert_eq!(budget.captured_bytes, 8);
+
+        assert_eq!(snapshot.hkcu_folder_types.read_errors.len(), 1);
+
+        let error = &snapshot.hkcu_folder_types.read_errors[0];
+
+        assert_eq!(error.key_path, missing_path);
+        assert_eq!(error.operation, "open_key");
+
+        assert_eq!(count_snapshot_read_errors(&snapshot), 1);
 
         assert!(matches!(snapshot.status, InspectionStatus::Partial { .. }));
     }
