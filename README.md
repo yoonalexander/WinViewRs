@@ -13,7 +13,7 @@ The current implementation is a **read-only Explorer configuration inspector**. 
 ## Current status
 
 - **Phase 0: Read-only inspection foundation** — implemented. Registry reads, value decoding, structured snapshots, CLI output, and resource-bounded traversal.
-- **Phase 1: Read-only desktop GUI** — foundation implemented. The native GUI can now launch but does not yet connect to registry inspection.
+- **Phase 1: Read-only desktop GUI** — inspection overview and Windows metadata displayed. The native GUI launches and connects to the registry inspector.
 - **Later phases**: Configuration planning, backups, restoration, and explicitly authorized application of changes.
 
 ## Features
@@ -152,13 +152,12 @@ cargo run -p winview-app --features gui -- gui
 
 Current GUI state:
 
-- The window opens in Idle state.
-- Manual inspection and refresh via button click.
-- Background registry inspection runs on a separate thread.
-- The GUI remains responsive during inspection.
-- Complete, Partial, and Failed status are displayed accurately.
-- Recorded inspection error count is shown.
-- Detailed registry browsing is not yet implemented.
+- Manual background inspection and refresh.
+- Inspection status (Complete, Partial, Failed) and recorded error count displayed.
+- Windows product name, build, UBR, detection method, and capture timestamp shown.
+- Per-domain record and error summaries (7 domains).
+- Detailed registry browsing remains unimplemented.
+- No configuration editing is supported.
 
 ## Known limitations
 

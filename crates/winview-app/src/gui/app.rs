@@ -8,6 +8,8 @@ use winview_core::RegistryReader;
 
 use super::inspection::InspectionState;
 
+use super::overview::show_overview;
+
 #[derive(Default)]
 pub struct WinViewApp {
     inspection: InspectionState,
@@ -89,6 +91,12 @@ impl eframe::App for WinViewApp {
                         "Recorded inspection errors: {}",
                         result.error_count
                     ));
+
+                    egui::ScrollArea::vertical()
+                        .id_salt("inspection_overview_scroll")
+                        .show(ui, |ui| {
+                            show_overview(ui, &result.overview);
+                        });
                 }
 
                 InspectionState::Error(error) => {

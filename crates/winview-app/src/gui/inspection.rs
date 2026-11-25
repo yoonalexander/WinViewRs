@@ -6,9 +6,12 @@ use winview_core::inspection::count_snapshot_read_errors;
 
 use winview_core::model::InspectionSnapshot;
 
+use super::overview::InspectionOverview;
+
 pub(super) struct CapturedInspection {
     pub(super) snapshot: InspectionSnapshot,
     pub(super) error_count: usize,
+    pub(super) overview: InspectionOverview,
 }
 
 #[derive(Default)]
@@ -43,9 +46,12 @@ impl InspectionState {
 
                 let error_count = count_snapshot_read_errors(&snapshot);
 
+                let overview = InspectionOverview::from_snapshot(&snapshot);
+
                 Ok(CapturedInspection {
                     snapshot,
                     error_count,
+                    overview,
                 })
             });
 
@@ -211,6 +217,10 @@ mod tests {
             assert_eq!(result.snapshot.metadata.captured_at, "synthetic timestamp");
 
             assert_eq!(result.error_count, expected_errors);
+
+            assert_eq!(result.overview.metadata[4].1, "synthetic timestamp");
+
+            assert_eq!(result.overview.global_errors, expected_errors);
         }
     }
 

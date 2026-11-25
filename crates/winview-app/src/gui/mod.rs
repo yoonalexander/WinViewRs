@@ -6,6 +6,8 @@ pub mod app;
 pub mod inspection;
 #[cfg(feature = "gui")]
 pub mod inspector_tab;
+#[cfg(feature = "gui")]
+pub mod overview;
 
 #[cfg(feature = "gui")]
 pub fn run_gui() -> anyhow::Result<()> {
