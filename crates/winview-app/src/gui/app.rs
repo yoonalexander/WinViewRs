@@ -11,6 +11,7 @@ use super::inspection::InspectionState;
 use super::advanced::show_advanced;
 use super::folder_types::FolderBrowser;
 use super::overview::show_overview;
+use super::registry_browser::RegistryBrowser;
 
 #[derive(Default, PartialEq, Eq)]
 enum InspectorPage {
@@ -18,6 +19,7 @@ enum InspectorPage {
     Overview,
     FolderTypes,
     Advanced,
+    RegistryDomains,
 }
 
 #[derive(Default)]
@@ -25,6 +27,7 @@ pub struct WinViewApp {
     inspection: InspectionState,
     page: InspectorPage,
     folder_browser: FolderBrowser,
+    registry_browser: RegistryBrowser,
 }
 
 impl eframe::App for WinViewApp {
@@ -62,6 +65,8 @@ impl eframe::App for WinViewApp {
                 })
             {
                 self.folder_browser = FolderBrowser::default();
+
+                self.registry_browser = RegistryBrowser::default();
 
                 self.page = InspectorPage::Overview;
             }
@@ -117,6 +122,8 @@ impl eframe::App for WinViewApp {
                         );
 
                         ui.selectable_value(&mut self.page, InspectorPage::Advanced, "Advanced");
+
+                        ui.selectable_value(&mut self.page, InspectorPage::RegistryDomains, "Registry domains");
                     });
 
                     match self.page {
@@ -145,6 +152,17 @@ impl eframe::App for WinViewApp {
                                 .id_salt("advanced_settings_scroll")
                                 .show(ui, |ui| {
                                     show_advanced(ui, &result.snapshot.advanced);
+                                });
+                        }
+
+                        InspectorPage::RegistryDomains => {
+                            egui::ScrollArea::vertical()
+                                .id_salt("registry_domains_scroll")
+                                .show(ui, |ui| {
+                                    self.registry_browser.show(
+                                        ui,
+                                        &result.snapshot,
+                                    );
                                 });
                         }
                     }
