@@ -2,20 +2,26 @@
 
 use anyhow::{Context, Result};
 use std::io::{self, Write};
+use std::process::ExitCode;
 use winview_core::model::InspectionSnapshot;
 use winview_core::RegistryReader;
 
-pub fn run_export_toml() -> Result<()> {
+use super::write_snapshot_with_status;
+
+pub fn run_export_toml() -> Result<ExitCode> {
     let reader = winview_registry::WindowsRegistryReader;
 
     let snapshot = reader.inspect_all()?;
 
     let stdout = io::stdout();
 
-    write_snapshot_toml(&snapshot, stdout.lock())
+    write_snapshot_with_status(&snapshot, stdout.lock(), write_snapshot_toml)
 }
 
-fn write_snapshot_toml(snapshot: &InspectionSnapshot, mut writer: impl Write) -> Result<()> {
+pub(super) fn write_snapshot_toml(
+    snapshot: &InspectionSnapshot,
+    mut writer: impl Write,
+) -> Result<()> {
     let serialized = toml::to_string_pretty(snapshot)
         .context("TOML export could not represent the snapshot; use dump --format json instead")?;
 

@@ -2,8 +2,11 @@
 
 use anyhow::Result;
 use std::io::{self, Write};
+use std::process::ExitCode;
 use winview_core::model::{FolderTypesSnapshot, InspectionSnapshot, KeySnapshot};
 use winview_core::RegistryReader;
+
+use super::write_snapshot_with_status;
 
 fn count_key_errors(key: &KeySnapshot) -> usize {
     key.read_errors.len() + key.subkeys.values().map(count_key_errors).sum::<usize>()
@@ -34,17 +37,20 @@ fn count_inspection_errors(snapshot: &InspectionSnapshot) -> usize {
         .sum::<usize>()
 }
 
-pub fn run_inspect() -> Result<()> {
+pub fn run_inspect() -> Result<ExitCode> {
     let reader = winview_registry::WindowsRegistryReader;
 
     let snapshot = reader.inspect_all()?;
 
     let stdout = io::stdout();
 
-    write_snapshot_summary(&snapshot, stdout.lock())
+    write_snapshot_with_status(&snapshot, stdout.lock(), write_snapshot_summary)
 }
 
-fn write_snapshot_summary(snapshot: &InspectionSnapshot, mut writer: impl Write) -> Result<()> {
+pub(super) fn write_snapshot_summary(
+    snapshot: &InspectionSnapshot,
+    mut writer: impl Write,
+) -> Result<()> {
     writeln!(writer, "WinViewRs Inspection Snapshot")?;
     writeln!(writer, "=============================")?;
     writeln!(writer, "Captured at: {}", snapshot.metadata.captured_at)?;
@@ -116,7 +122,10 @@ fn write_snapshot_summary(snapshot: &InspectionSnapshot, mut writer: impl Write)
     Ok(())
 }
 
-fn write_snapshot_json(snapshot: &InspectionSnapshot, mut writer: impl Write) -> Result<()> {
+pub(super) fn write_snapshot_json(
+    snapshot: &InspectionSnapshot,
+    mut writer: impl Write,
+) -> Result<()> {
     serde_json::to_writer_pretty(&mut writer, snapshot)?;
 
     writeln!(writer)?;
@@ -125,14 +134,14 @@ fn write_snapshot_json(snapshot: &InspectionSnapshot, mut writer: impl Write) ->
     Ok(())
 }
 
-pub fn run_dump_json() -> Result<()> {
+pub fn run_dump_json() -> Result<ExitCode> {
     let reader = winview_registry::WindowsRegistryReader;
 
     let snapshot = reader.inspect_all()?;
 
     let stdout = io::stdout();
 
-    write_snapshot_json(&snapshot, stdout.lock())
+    write_snapshot_with_status(&snapshot, stdout.lock(), write_snapshot_json)
 }
 
 #[cfg(test)]

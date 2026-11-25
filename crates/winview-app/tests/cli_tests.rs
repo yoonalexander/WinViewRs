@@ -29,24 +29,31 @@ mod cli_tests {
 
     #[test]
     fn cli_dump_outputs_valid_snapshot() {
+        use winview_core::model::{InspectionSnapshot, InspectionStatus};
+
         let output = Command::new(get_binary())
             .args(["dump", "--format", "json"])
             .output()
             .expect("Failed to run CLI binary");
 
-        assert!(
-            output.status.success(),
-            "CLI dump failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
+        let snapshot: InspectionSnapshot =
+            serde_json::from_slice(&output.stdout).unwrap_or_else(|error| {
+                panic!(
+                    "Invalid JSON snapshot: {}; stderr: {}",
+                    error,
+                    String::from_utf8_lossy(&output.stderr)
+                )
+            });
 
-        let snapshot: winview_core::model::InspectionSnapshot =
-            serde_json::from_slice(&output.stdout).expect("Expected an InspectionSnapshot");
+        let expected_code = match snapshot.status {
+            InspectionStatus::Complete => 0,
+            InspectionStatus::Partial { .. } => 3,
+            InspectionStatus::Failed { .. } => 1,
+        };
 
-        assert!(
-            !snapshot.metadata.captured_at.is_empty(),
-            "Snapshot capture timestamp is missing"
-        );
+        assert_eq!(output.status.code(), Some(expected_code));
+
+        assert!(!snapshot.metadata.captured_at.is_empty());
     }
 
     #[test]
@@ -57,7 +64,7 @@ mod cli_tests {
             .arg("nonexistent-command")
             .output()
             .expect("Failed to run CLI binary");
-        assert!(!output.status.success(), "Invalid subcommand should fail");
+        assert_eq!(output.status.code(), Some(2));
     }
 
     #[test]
@@ -80,13 +87,13 @@ mod cli_tests {
             .output()
             .expect("Failed to run CLI binary");
 
-        assert!(!output.status.success());
-
         assert!(output.stdout.is_empty());
 
         let stderr = String::from_utf8_lossy(&output.stderr);
 
         assert!(stderr.contains("Unsupported format: xml"));
+
+        assert_eq!(output.status.code(), Some(2));
     }
 
     #[test]
@@ -113,12 +120,6 @@ mod cli_tests {
             .output()
             .expect("Failed to run CLI binary");
 
-        assert!(
-            output.status.success(),
-            "CLI inspect failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-
         let stdout = String::from_utf8(output.stdout).expect("Expected UTF-8 output");
 
         for expected in [
@@ -139,5 +140,22 @@ mod cli_tests {
                 "Missing summary field: {expected}"
             );
         }
+
+        let status = stdout
+            .lines()
+            .find_map(|line| line.strip_prefix("Status: "))
+            .expect("Missing inspection status");
+
+        let expected_code = if status == "Complete" {
+            0
+        } else if status.starts_with("Partial {") {
+            3
+        } else if status.starts_with("Failed {") {
+            1
+        } else {
+            panic!("Unexpected inspection status: {status}");
+        };
+
+        assert_eq!(output.status.code(), Some(expected_code));
     }
 }

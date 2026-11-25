@@ -2,6 +2,7 @@
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
+use std::process::ExitCode;
 use winview_app::cli;
 use winview_app::logging;
 
@@ -30,27 +31,24 @@ enum Commands {
     Export,
 }
 
-fn main() -> Result<()> {
+fn main() -> Result<ExitCode> {
     logging::init_logging();
 
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Inspect => {
-            cli::inspect::run_inspect()?;
-        }
+        Commands::Inspect => cli::inspect::run_inspect(),
+
         Commands::Dump { format } => {
             if format == "json" {
-                cli::inspect::run_dump_json()?;
+                cli::inspect::run_dump_json()
             } else {
                 eprintln!("Unsupported format: {}", format);
-                std::process::exit(1);
+
+                Ok(ExitCode::from(2))
             }
         }
-        Commands::Export => {
-            cli::output::run_export_toml()?;
-        }
-    }
 
-    Ok(())
+        Commands::Export => cli::output::run_export_toml(),
+    }
 }
