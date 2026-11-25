@@ -4779,4 +4779,167 @@ mod depth_tests {
             }
         }
     }
+
+    #[test]
+    fn reg_dword_decodes_little_endian_values() {
+        for value in [0u32, 1, 42, 0x12345678, u32::MAX] {
+            let bytes = value.to_le_bytes();
+
+            let (type_name, decoded, raw, status) = convert_registry_value(RegType::U32, &bytes);
+
+            assert_eq!(type_name, ValueTypeName::RegDword);
+
+            assert_eq!(type_name.to_raw_id(), 4);
+
+            assert_eq!(decoded, RegistryValue::Dword(value));
+
+            assert_eq!(raw, bytes.to_vec());
+
+            assert_eq!(status, DecodingStatus::Decoded);
+        }
+    }
+
+    #[test]
+    fn reg_dword_rejects_invalid_lengths() {
+        for length in [0, 1, 2, 3, 5, 8] {
+            let bytes = vec![0xAB; length];
+
+            let (type_name, fallback, raw, status) = convert_registry_value(RegType::U32, &bytes);
+
+            assert_eq!(type_name, ValueTypeName::RegDword);
+
+            assert_eq!(raw, bytes);
+
+            assert_eq!(fallback, RegistryValue::Binary(bytes));
+
+            assert!(matches!(status, DecodingStatus::Malformed { .. }));
+        }
+    }
+
+    #[test]
+    fn reg_qword_decodes_little_endian_values() {
+        for value in [
+            0u64,
+            1,
+            42,
+            u32::MAX as u64 + 1,
+            0x123456789ABCDEF0,
+            u64::MAX,
+        ] {
+            let bytes = value.to_le_bytes();
+
+            let (type_name, decoded, raw, status) = convert_registry_value(RegType::U64, &bytes);
+
+            assert_eq!(type_name, ValueTypeName::RegQword);
+
+            assert_eq!(type_name.to_raw_id(), 11);
+
+            assert_eq!(decoded, RegistryValue::Qword(value));
+
+            assert_eq!(raw, bytes.to_vec());
+
+            assert_eq!(status, DecodingStatus::Decoded);
+        }
+    }
+
+    #[test]
+    fn reg_qword_rejects_invalid_lengths() {
+        for length in [0, 1, 4, 7, 9, 16] {
+            let bytes = vec![0xCD; length];
+
+            let (type_name, fallback, raw, status) = convert_registry_value(RegType::U64, &bytes);
+
+            assert_eq!(type_name, ValueTypeName::RegQword);
+
+            assert_eq!(raw, bytes);
+
+            assert_eq!(fallback, RegistryValue::Binary(bytes));
+
+            assert!(matches!(status, DecodingStatus::Malformed { .. }));
+        }
+    }
+
+    #[test]
+    fn reg_binary_preserves_arbitrary_payloads() {
+        let payloads = [
+            Vec::new(),
+            vec![0],
+            vec![0, 255, 128, 1, 0, 42],
+            (0u8..=255).collect::<Vec<u8>>(),
+        ];
+
+        for bytes in payloads {
+            let (type_name, decoded, raw, status) = convert_registry_value(RegType::Bytes, &bytes);
+
+            assert_eq!(type_name, ValueTypeName::RegBinary);
+
+            assert_eq!(type_name.to_raw_id(), 3);
+
+            assert_eq!(raw, bytes);
+
+            assert_eq!(decoded, RegistryValue::Binary(bytes));
+
+            assert_eq!(status, DecodingStatus::Decoded);
+        }
+    }
+
+    #[test]
+    fn reg_none_preserves_raw_payload() {
+        for bytes in [Vec::new(), vec![0, 1, 255, 42]] {
+            let (type_name, fallback, raw, status) =
+                convert_registry_value(RegType::Other(0), &bytes);
+
+            assert_eq!(type_name, ValueTypeName::Other(0));
+
+            assert_eq!(type_name.to_raw_id(), 0);
+
+            assert_eq!(raw, bytes);
+
+            assert_eq!(fallback, RegistryValue::Binary(bytes));
+
+            assert_eq!(status, DecodingStatus::UnknownType);
+        }
+    }
+
+    #[test]
+    fn unsupported_registry_types_preserve_numeric_ids() {
+        for id in [5u32, 6, 8, 9, 10, 12, 999, u32::MAX] {
+            let bytes = vec![0, 1, 128, 255];
+
+            let (type_name, fallback, raw, status) =
+                convert_registry_value(RegType::Other(id), &bytes);
+
+            assert_eq!(type_name, ValueTypeName::Other(id));
+
+            assert_eq!(type_name.to_raw_id(), id);
+
+            assert_eq!(raw, bytes);
+
+            assert_eq!(fallback, RegistryValue::Binary(bytes));
+
+            assert_eq!(status, DecodingStatus::UnknownType);
+        }
+    }
+
+    #[test]
+    fn registry_type_mapping_preserves_win32_ids() {
+        let cases = [
+            (RegType::String, ValueTypeName::RegSz, 1u32),
+            (RegType::ExpandString, ValueTypeName::RegExpandSz, 2),
+            (RegType::Bytes, ValueTypeName::RegBinary, 3),
+            (RegType::U32, ValueTypeName::RegDword, 4),
+            (RegType::MultiString, ValueTypeName::RegMultiSz, 7),
+            (RegType::U64, ValueTypeName::RegQword, 11),
+            (RegType::Other(0), ValueTypeName::Other(0), 0),
+            (RegType::Other(999), ValueTypeName::Other(999), 999),
+        ];
+
+        for (windows_type, expected_type, id) in cases {
+            let converted = convert_type(windows_type);
+
+            assert_eq!(converted, expected_type);
+
+            assert_eq!(converted.to_raw_id(), id);
+        }
+    }
 }
