@@ -787,7 +787,7 @@ fn inspect_folder_types_hive(
 }
 
 fn inspect_bags(
-    reader: &WindowsRegistryReader,
+    reader: &dyn RegistryReader,
     snapshot: &mut InspectionSnapshot,
     snapshot_budget: &mut SnapshotBudget,
 ) {
@@ -804,6 +804,7 @@ fn inspect_bags(
         ObservationSource::HkcuBags,
         &mut snapshot.bags,
         "",
+        KeyPresence::Optional,
         0,
         &mut budget,
         snapshot_budget,
@@ -815,6 +816,7 @@ fn inspect_bags(
         ObservationSource::HkcuBags,
         &mut snapshot.bags,
         "",
+        KeyPresence::Optional,
         0,
         &mut budget,
         snapshot_budget,
@@ -826,6 +828,7 @@ fn inspect_bags(
         ObservationSource::HkcuBags,
         &mut snapshot.bags,
         "",
+        KeyPresence::Optional,
         0,
         &mut budget,
         snapshot_budget,
@@ -837,6 +840,7 @@ fn inspect_bags(
         ObservationSource::HkcuBags,
         &mut snapshot.bags,
         "",
+        KeyPresence::Optional,
         0,
         &mut budget,
         snapshot_budget,
@@ -848,6 +852,7 @@ fn inspect_bags(
         ObservationSource::HkcuBags,
         &mut snapshot.bags,
         "",
+        KeyPresence::Optional,
         0,
         &mut budget,
         snapshot_budget,
@@ -855,7 +860,7 @@ fn inspect_bags(
 }
 
 fn inspect_streams(
-    reader: &WindowsRegistryReader,
+    reader: &dyn RegistryReader,
     snapshot: &mut InspectionSnapshot,
     snapshot_budget: &mut SnapshotBudget,
 ) {
@@ -870,6 +875,7 @@ fn inspect_streams(
         ObservationSource::HkcuStreams,
         &mut snapshot.streams,
         "",
+        KeyPresence::Optional,
         0,
         &mut budget,
         snapshot_budget,
@@ -881,6 +887,7 @@ fn inspect_streams(
         ObservationSource::HkcuStreams,
         &mut snapshot.streams,
         "",
+        KeyPresence::Optional,
         0,
         &mut budget,
         snapshot_budget,
@@ -892,6 +899,7 @@ fn inspect_streams(
         ObservationSource::HkcuStreams,
         &mut snapshot.streams,
         "",
+        KeyPresence::Optional,
         0,
         &mut budget,
         snapshot_budget,
@@ -993,7 +1001,7 @@ fn inspect_advanced(
 }
 
 fn inspect_clsid(
-    reader: &WindowsRegistryReader,
+    reader: &dyn RegistryReader,
     snapshot: &mut InspectionSnapshot,
     snapshot_budget: &mut SnapshotBudget,
 ) {
@@ -1022,6 +1030,7 @@ fn inspect_clsid(
             ObservationSource::HkcuClsid,
             &mut snapshot.clsid,
             "",
+            KeyPresence::Optional,
             0,
             &mut budget,
             snapshot_budget,
@@ -1030,7 +1039,7 @@ fn inspect_clsid(
 }
 
 fn inspect_policies(
-    reader: &WindowsRegistryReader,
+    reader: &dyn RegistryReader,
     snapshot: &mut InspectionSnapshot,
     snapshot_budget: &mut SnapshotBudget,
 ) {
@@ -1045,6 +1054,7 @@ fn inspect_policies(
         ObservationSource::HkcuPolicies,
         &mut snapshot.policies,
         "",
+        KeyPresence::Optional,
         0,
         &mut budget,
         snapshot_budget,
@@ -1056,6 +1066,7 @@ fn inspect_policies(
         ObservationSource::HkcuPolicies,
         &mut snapshot.policies,
         "",
+        KeyPresence::Optional,
         0,
         &mut budget,
         snapshot_budget,
@@ -1067,6 +1078,7 @@ fn inspect_policies(
         ObservationSource::HklmPolicies,
         &mut snapshot.policies,
         "HKLM",
+        KeyPresence::Optional,
         0,
         &mut budget,
         snapshot_budget,
@@ -1078,6 +1090,7 @@ fn inspect_policies(
         ObservationSource::HkcuPolicies,
         &mut snapshot.policies,
         "",
+        KeyPresence::Optional,
         0,
         &mut budget,
         snapshot_budget,
@@ -1129,6 +1142,12 @@ fn check_snapshot_budget(
     })
 }
 
+#[derive(Clone, Copy)]
+enum KeyPresence {
+    Optional,
+    Required,
+}
+
 #[allow(clippy::too_many_arguments)]
 fn inspect_key_tree(
     reader: &dyn RegistryReader,
@@ -1137,6 +1156,7 @@ fn inspect_key_tree(
     source: ObservationSource,
     target: &mut BTreeMap<String, KeySnapshot>,
     key_prefix: &str,
+    presence: KeyPresence,
     depth: usize,
     budget: &mut TraversalBudget,
     snapshot_budget: &mut SnapshotBudget,
@@ -1184,17 +1204,26 @@ fn inspect_key_tree(
     budget.record_visit();
 
     let key_result = reader.open_key(root, path);
+
     let key = match key_result {
         Ok(k) => k,
+
+        Err(RegistryError::KeyNotFound { .. }) if matches!(presence, KeyPresence::Optional) => {
+            return;
+        }
+
         Err(e) => {
             let mut snapshot = KeySnapshot::default();
+
             snapshot.read_errors.push(InspectionError {
                 key_path: path.to_string(),
                 root,
                 operation: "open_key".to_string(),
                 error: e.to_string(),
             });
+
             target.insert(map_key.clone(), snapshot);
+
             return;
         }
     };
@@ -1297,6 +1326,7 @@ fn inspect_key_tree(
                     source,
                     &mut snapshot.subkeys,
                     "",
+                    KeyPresence::Required,
                     depth + 1,
                     budget,
                     snapshot_budget,
@@ -1562,6 +1592,7 @@ mod depth_tests {
         values: Arc<FakeValues>,
         enum_failures: Arc<EnumFailures>,
         value_failures: Arc<ValueFailures>,
+        denied_keys: BTreeSet<String>,
     }
 
     impl FakeReader {
@@ -1572,6 +1603,7 @@ mod depth_tests {
                 values: Arc::new(FakeValues::new()),
                 enum_failures: Arc::new(EnumFailures::default()),
                 value_failures: Arc::new(BTreeMap::new()),
+                denied_keys: BTreeSet::new(),
             }
         }
 
@@ -1582,7 +1614,14 @@ mod depth_tests {
                 values: Arc::new(values),
                 enum_failures: Arc::new(EnumFailures::default()),
                 value_failures: Arc::new(BTreeMap::new()),
+                denied_keys: BTreeSet::new(),
             }
+        }
+
+        fn with_denied_key(mut self, path: &str) -> Self {
+            self.denied_keys.insert(path.to_string());
+
+            self
         }
 
         fn with_value_failure(
@@ -1726,6 +1765,13 @@ mod depth_tests {
                 .lock()
                 .unwrap()
                 .push((root, path.to_string()));
+
+            if self.denied_keys.contains(path) {
+                return Err(RegistryError::AccessDenied {
+                    root,
+                    path: path.to_string(),
+                });
+            }
 
             if self.data.contains_key(path) {
                 Ok(Box::new(FakeKey {
@@ -1892,6 +1938,35 @@ mod depth_tests {
             ObservationSource::HkcuBags,
             &mut snapshot.bags,
             "",
+            KeyPresence::Required,
+            0,
+            &mut budget,
+            &mut snapshot_budget,
+        );
+
+        finalize_inspection_status(&mut snapshot);
+
+        (snapshot, budget)
+    }
+
+    fn inspect_optional_test_tree(
+        reader: &dyn RegistryReader,
+        max_keys: usize,
+    ) -> (InspectionSnapshot, TraversalBudget) {
+        let mut snapshot = InspectionSnapshot::default();
+
+        let mut budget = TraversalBudget::new(max_keys);
+
+        let mut snapshot_budget = SnapshotBudget::new(MAX_SNAPSHOT_BYTES);
+
+        inspect_key_tree(
+            reader,
+            RootKey::Hkcu,
+            "root",
+            ObservationSource::HkcuBags,
+            &mut snapshot.bags,
+            "",
+            KeyPresence::Optional,
             0,
             &mut budget,
             &mut snapshot_budget,
@@ -1915,6 +1990,7 @@ mod depth_tests {
             ObservationSource::HkcuBags,
             &mut target,
             "",
+            KeyPresence::Required,
             0,
             &mut budget,
             &mut snapshot_budget,
@@ -1935,6 +2011,7 @@ mod depth_tests {
             ObservationSource::HkcuBags,
             &mut target,
             "",
+            KeyPresence::Required,
             0,
             &mut budget,
             &mut snapshot_budget,
@@ -1955,6 +2032,7 @@ mod depth_tests {
             ObservationSource::HkcuBags,
             &mut target,
             "",
+            KeyPresence::Required,
             0,
             &mut budget,
             &mut snapshot_budget,
@@ -1983,6 +2061,7 @@ mod depth_tests {
             ObservationSource::HkcuBags,
             &mut target,
             "",
+            KeyPresence::Required,
             0,
             &mut budget,
             &mut snapshot_budget,
@@ -2014,6 +2093,7 @@ mod depth_tests {
             ObservationSource::HkcuBags,
             &mut target,
             "",
+            KeyPresence::Required,
             0,
             &mut budget,
             &mut snapshot_budget,
@@ -2261,6 +2341,7 @@ mod depth_tests {
             ObservationSource::HkcuBags,
             &mut snapshot.bags,
             "",
+            KeyPresence::Required,
             0,
             &mut budget,
             &mut snapshot_budget,
@@ -2272,6 +2353,7 @@ mod depth_tests {
             ObservationSource::HkcuBags,
             &mut snapshot.bags,
             "",
+            KeyPresence::Required,
             0,
             &mut budget,
             &mut snapshot_budget,
@@ -2309,6 +2391,7 @@ mod depth_tests {
             ObservationSource::HkcuBags,
             &mut snapshot.bags,
             "",
+            KeyPresence::Required,
             0,
             &mut budget,
             &mut snapshot_budget,
@@ -2335,6 +2418,7 @@ mod depth_tests {
             ObservationSource::HkcuBags,
             &mut snapshot.bags,
             "",
+            KeyPresence::Required,
             0,
             &mut budget,
             &mut snapshot_budget,
@@ -2363,6 +2447,7 @@ mod depth_tests {
             ObservationSource::HkcuBags,
             &mut snapshot.bags,
             "",
+            KeyPresence::Required,
             0,
             &mut budget,
             &mut snapshot_budget,
@@ -2391,6 +2476,7 @@ mod depth_tests {
             ObservationSource::HkcuBags,
             &mut snapshot.bags,
             "",
+            KeyPresence::Required,
             0,
             &mut budget,
             &mut snapshot_budget,
@@ -2420,6 +2506,7 @@ mod depth_tests {
             ObservationSource::HkcuBags,
             &mut snapshot.bags,
             "",
+            KeyPresence::Required,
             0,
             &mut budget,
             &mut snapshot_budget,
@@ -2462,6 +2549,7 @@ mod depth_tests {
             ObservationSource::HkcuBags,
             &mut snapshot.bags,
             "",
+            KeyPresence::Required,
             0,
             &mut budget,
             &mut snapshot_budget,
@@ -2501,6 +2589,7 @@ mod depth_tests {
             ObservationSource::HkcuBags,
             &mut snapshot.bags,
             "",
+            KeyPresence::Required,
             0,
             &mut budget,
             &mut snapshot_budget,
@@ -2531,6 +2620,7 @@ mod depth_tests {
             ObservationSource::HkcuBags,
             &mut snapshot.bags,
             "",
+            KeyPresence::Required,
             0,
             &mut budget,
             &mut snapshot_budget,
@@ -3172,6 +3262,7 @@ mod depth_tests {
             ObservationSource::HkcuBags,
             &mut snapshot.bags,
             "",
+            KeyPresence::Required,
             0,
             &mut budget,
             &mut snapshot_budget,
@@ -3223,6 +3314,7 @@ mod depth_tests {
             ObservationSource::HkcuBags,
             &mut snapshot.bags,
             "",
+            KeyPresence::Required,
             0,
             &mut budget,
             &mut snapshot_budget,
@@ -3314,6 +3406,7 @@ mod depth_tests {
             ObservationSource::HkcuBags,
             &mut snapshot.bags,
             "",
+            KeyPresence::Required,
             0,
             &mut budget,
             &mut snapshot_budget,
@@ -3369,6 +3462,7 @@ mod depth_tests {
             ObservationSource::HkcuBags,
             &mut snapshot.bags,
             "",
+            KeyPresence::Required,
             0,
             &mut budget,
             &mut snapshot_budget,
@@ -3382,6 +3476,7 @@ mod depth_tests {
             ObservationSource::HkcuStreams,
             &mut snapshot.streams,
             "",
+            KeyPresence::Required,
             0,
             &mut budget2,
             &mut snapshot_budget,
@@ -3435,6 +3530,7 @@ mod depth_tests {
             ObservationSource::HkcuBags,
             &mut snapshot.bags,
             "",
+            KeyPresence::Required,
             0,
             &mut budget,
             &mut snapshot_budget,
@@ -3489,6 +3585,7 @@ mod depth_tests {
             ObservationSource::HkcuBags,
             &mut snapshot.bags,
             "",
+            KeyPresence::Required,
             0,
             &mut budget,
             &mut snapshot_budget,
@@ -4941,5 +5038,157 @@ mod depth_tests {
 
             assert_eq!(converted.to_raw_id(), id);
         }
+    }
+
+    #[test]
+    fn missing_optional_root_is_not_an_error() {
+        let reader = FakeReader::new(BTreeMap::new());
+
+        let (snapshot, budget) = inspect_optional_test_tree(&reader, MAX_KEYS_PER_DOMAIN);
+
+        assert!(snapshot.bags.is_empty());
+
+        assert_eq!(count_snapshot_read_errors(&snapshot), 0);
+
+        assert_eq!(budget.visited_keys, 1);
+
+        assert!(!budget.limit_exceeded);
+
+        assert!(matches!(snapshot.status, InspectionStatus::Complete));
+
+        assert_eq!(reader.opened_keys.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn optional_root_access_denied_remains_an_error() {
+        let reader = FakeReader::new(BTreeMap::new()).with_denied_key("root");
+
+        let (snapshot, budget) = inspect_optional_test_tree(&reader, MAX_KEYS_PER_DOMAIN);
+
+        let root = snapshot.bags.get("root").expect("Error snapshot missing");
+
+        assert_eq!(root.read_errors.len(), 1);
+
+        assert_eq!(root.read_errors[0].operation, "open_key");
+
+        assert_eq!(count_snapshot_read_errors(&snapshot), 1);
+
+        assert_eq!(budget.visited_keys, 1);
+
+        assert!(matches!(snapshot.status, InspectionStatus::Failed { .. }));
+    }
+
+    #[test]
+    fn missing_enumerated_child_remains_an_error() {
+        let mut data = BTreeMap::new();
+
+        data.insert("root".to_string(), vec!["child".to_string()]);
+
+        let reader = FakeReader::new(data);
+
+        let (snapshot, budget) = inspect_optional_test_tree(&reader, MAX_KEYS_PER_DOMAIN);
+
+        let root = snapshot.bags.get("root").expect("Root missing");
+
+        assert!(matches!(
+            root.values.get("TestValue"),
+            Some(ValueReadResult::Success(_))
+        ));
+
+        let child = root
+            .subkeys
+            .get(r"root\child")
+            .expect("Missing child error snapshot");
+
+        assert_eq!(child.read_errors.len(), 1);
+
+        assert_eq!(child.read_errors[0].operation, "open_key");
+
+        assert_eq!(count_snapshot_read_errors(&snapshot), 1);
+
+        assert_eq!(budget.visited_keys, 2);
+
+        assert!(matches!(snapshot.status, InspectionStatus::Partial { .. }));
+    }
+
+    #[test]
+    fn existing_optional_root_is_inspected_normally() {
+        let reader = build_hierarchy(1);
+
+        let (snapshot, budget) = inspect_optional_test_tree(&reader, MAX_KEYS_PER_DOMAIN);
+
+        let root = snapshot.bags.get("root").expect("Root missing");
+
+        assert!(matches!(
+            root.values.get("TestValue"),
+            Some(ValueReadResult::Success(_))
+        ));
+
+        let child = root.subkeys.get(r"root\child").expect("Child missing");
+
+        assert!(matches!(
+            child.values.get("TestValue"),
+            Some(ValueReadResult::Success(_))
+        ));
+
+        assert_eq!(count_snapshot_read_errors(&snapshot), 0);
+
+        assert_eq!(budget.visited_keys, 2);
+
+        assert!(matches!(snapshot.status, InspectionStatus::Complete));
+    }
+
+    #[test]
+    fn missing_optional_roots_across_recursive_domains_are_not_errors() {
+        let reader = FakeReader::new(BTreeMap::new());
+
+        let mut snapshot = InspectionSnapshot::default();
+
+        let mut snapshot_budget = SnapshotBudget::new(MAX_SNAPSHOT_BYTES);
+
+        inspect_bags(&reader, &mut snapshot, &mut snapshot_budget);
+
+        inspect_streams(&reader, &mut snapshot, &mut snapshot_budget);
+
+        inspect_clsid(&reader, &mut snapshot, &mut snapshot_budget);
+
+        inspect_policies(&reader, &mut snapshot, &mut snapshot_budget);
+
+        finalize_inspection_status(&mut snapshot);
+
+        assert!(snapshot.bags.is_empty());
+        assert!(snapshot.streams.is_empty());
+        assert!(snapshot.clsid.is_empty());
+        assert!(snapshot.policies.is_empty());
+
+        assert_eq!(count_snapshot_read_errors(&snapshot), 0);
+
+        assert_eq!(reader.opened_keys.lock().unwrap().len(), 23);
+
+        assert!(matches!(snapshot.status, InspectionStatus::Complete));
+    }
+
+    #[test]
+    fn optional_root_does_not_bypass_key_limit() {
+        let reader = FakeReader::new(BTreeMap::new());
+
+        let (snapshot, budget) = inspect_optional_test_tree(&reader, 0);
+
+        assert!(budget.limit_exceeded);
+
+        assert_eq!(budget.visited_keys, 0);
+
+        assert!(reader.opened_keys.lock().unwrap().is_empty());
+
+        let root = snapshot
+            .bags
+            .get("root")
+            .expect("Key limit snapshot missing");
+
+        assert_eq!(root.read_errors.len(), 1);
+
+        assert_eq!(root.read_errors[0].operation, "key_limit");
+
+        assert!(matches!(snapshot.status, InspectionStatus::Partial { .. }));
     }
 }
