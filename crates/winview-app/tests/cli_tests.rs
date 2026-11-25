@@ -105,4 +105,39 @@ mod cli_tests {
             assert!(stdout.contains("Usage:"));
         }
     }
+
+    #[test]
+    fn cli_inspect_outputs_human_readable_summary() {
+        let output = Command::new(get_binary())
+            .arg("inspect")
+            .output()
+            .expect("Failed to run CLI binary");
+
+        assert!(
+            output.status.success(),
+            "CLI inspect failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        let stdout = String::from_utf8(output.stdout).expect("Expected UTF-8 output");
+
+        for expected in [
+            "WinViewRs Inspection Snapshot",
+            "Captured at:",
+            "Status:",
+            "HKCU Folder Types:",
+            "HKLM Folder Types:",
+            "Bags:",
+            "Streams:",
+            "Advanced:",
+            "CLSID:",
+            "Policies:",
+            "Errors:",
+        ] {
+            assert!(
+                stdout.contains(expected),
+                "Missing summary field: {expected}"
+            );
+        }
+    }
 }

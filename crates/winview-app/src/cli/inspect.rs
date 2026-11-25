@@ -2,36 +2,86 @@
 
 use anyhow::Result;
 use std::io::{self, Write};
-use winview_core::model::InspectionSnapshot;
+use winview_core::model::{FolderTypesSnapshot, InspectionSnapshot, KeySnapshot};
 use winview_core::RegistryReader;
+
+fn count_key_errors(key: &KeySnapshot) -> usize {
+    key.read_errors.len() + key.subkeys.values().map(count_key_errors).sum::<usize>()
+}
+
+fn count_folder_types_errors(folder_types: &FolderTypesSnapshot) -> usize {
+    folder_types.read_errors.len()
+        + folder_types
+            .types
+            .values()
+            .map(|folder| folder.read_errors.len())
+            .sum::<usize>()
+}
+
+fn count_inspection_errors(snapshot: &InspectionSnapshot) -> usize {
+    snapshot.errors.len()
+        + count_folder_types_errors(&snapshot.hkcu_folder_types)
+        + count_folder_types_errors(&snapshot.hklm_folder_types)
+        + count_key_errors(&snapshot.advanced)
+        + [
+            &snapshot.bags,
+            &snapshot.streams,
+            &snapshot.clsid,
+            &snapshot.policies,
+        ]
+        .iter()
+        .map(|domain| domain.values().map(count_key_errors).sum::<usize>())
+        .sum::<usize>()
+}
 
 pub fn run_inspect() -> Result<()> {
     let reader = winview_registry::WindowsRegistryReader;
+
     let snapshot = reader.inspect_all()?;
 
-    // Human-readable table output
-    println!("WinViewRs Inspection Snapshot");
-    println!("=============================");
-    println!("Captured at: {}", snapshot.metadata.captured_at);
-    println!("Windows Build: {:?}", snapshot.metadata.windows_build);
-    println!("Windows UBR: {:?}", snapshot.metadata.windows_ubr);
-    println!("Product Name: {:?}", snapshot.metadata.windows_product_name);
-    println!("Detection Method: {:?}", snapshot.metadata.detection_method);
-    println!("Status: {:?}", snapshot.status);
-    println!();
+    let stdout = io::stdout();
 
-    println!(
+    write_snapshot_summary(&snapshot, stdout.lock())
+}
+
+fn write_snapshot_summary(snapshot: &InspectionSnapshot, mut writer: impl Write) -> Result<()> {
+    writeln!(writer, "WinViewRs Inspection Snapshot")?;
+    writeln!(writer, "=============================")?;
+    writeln!(writer, "Captured at: {}", snapshot.metadata.captured_at)?;
+    writeln!(
+        writer,
+        "Windows Build: {:?}",
+        snapshot.metadata.windows_build
+    )?;
+    writeln!(writer, "Windows UBR: {:?}", snapshot.metadata.windows_ubr)?;
+    writeln!(
+        writer,
+        "Product Name: {:?}",
+        snapshot.metadata.windows_product_name
+    )?;
+    writeln!(
+        writer,
+        "Detection Method: {:?}",
+        snapshot.metadata.detection_method
+    )?;
+    writeln!(writer, "Status: {:?}", snapshot.status)?;
+    writeln!(writer)?;
+
+    writeln!(
+        writer,
         "HKCU Folder Types: {} types",
         snapshot.hkcu_folder_types.types.len()
-    );
+    )?;
     for (guid, ft) in &snapshot.hkcu_folder_types.types {
-        println!(
+        writeln!(
+            writer,
             "  {} ({})",
             ft.canonical_name.as_deref().unwrap_or("?"),
             guid
-        );
+        )?;
         for (view_guid, view) in &ft.top_views {
-            println!(
+            writeln!(
+                writer,
                 "    View {}: LVM={:?} Mode={:?} IconSize={:?} GroupBy={:?} SortBy={:?}",
                 view_guid,
                 view.logical_view_mode,
@@ -39,20 +89,30 @@ pub fn run_inspect() -> Result<()> {
                 view.icon_size,
                 view.group_by,
                 view.sort_by_list
-            );
+            )?;
         }
     }
-    println!(
+    writeln!(
+        writer,
         "HKLM Folder Types: {} types",
         snapshot.hklm_folder_types.types.len()
-    );
-    println!("Bags: {} keys", snapshot.bags.len());
-    println!("Streams: {} keys", snapshot.streams.len());
-    println!("Advanced: {} values", snapshot.advanced.values.len());
-    println!("CLSID: {} keys", snapshot.clsid.len());
-    println!("Policies: {} keys", snapshot.policies.len());
-    println!("Errors: {}", snapshot.errors.len());
+    )?;
+    writeln!(writer, "Bags: {} top-level keys", snapshot.bags.len())?;
+    writeln!(writer, "Streams: {} top-level keys", snapshot.streams.len())?;
+    writeln!(
+        writer,
+        "Advanced: {} value observations",
+        snapshot.advanced.values.len()
+    )?;
+    writeln!(writer, "CLSID: {} top-level keys", snapshot.clsid.len())?;
+    writeln!(
+        writer,
+        "Policies: {} top-level keys",
+        snapshot.policies.len()
+    )?;
+    writeln!(writer, "Errors: {}", count_inspection_errors(snapshot))?;
 
+    writer.flush()?;
     Ok(())
 }
 
@@ -79,8 +139,8 @@ pub fn run_dump_json() -> Result<()> {
 mod tests {
     use super::*;
     use winview_core::model::{
-        DecodingStatus, InspectionStatus, ObservationSource, RawRegistryValue, ReadError,
-        ValueReadResult,
+        DecodingStatus, FolderTypeSnapshot, InspectionError, InspectionStatus, ObservationSource,
+        RawRegistryValue, ReadError, ValueReadResult,
     };
     use winview_core::registry::keys::RootKey;
 
@@ -180,5 +240,190 @@ mod tests {
             .expect_err("Writer failure must propagate");
 
         assert!(error.to_string().contains("injected write failure"));
+    }
+
+    #[test]
+    fn human_summary_counts_all_recorded_errors() {
+        let mut snapshot = InspectionSnapshot::default();
+
+        let error = |path: &str| InspectionError {
+            key_path: path.into(),
+            root: RootKey::Hkcu,
+            operation: "open_key".into(),
+            error: "injected failure".into(),
+        };
+
+        snapshot.errors.push(error("global"));
+
+        snapshot
+            .hkcu_folder_types
+            .read_errors
+            .push(error("HKCU FolderTypes"));
+
+        snapshot
+            .hklm_folder_types
+            .read_errors
+            .push(InspectionError {
+                root: RootKey::Hklm,
+                ..error("HKLM FolderTypes")
+            });
+
+        let mut hkcu_folder = FolderTypeSnapshot::default();
+
+        hkcu_folder.read_errors.push(error("HKCU folder"));
+
+        snapshot
+            .hkcu_folder_types
+            .types
+            .insert("folder1".into(), hkcu_folder);
+
+        let mut hklm_folder = FolderTypeSnapshot::default();
+
+        hklm_folder.read_errors.push(InspectionError {
+            root: RootKey::Hklm,
+            ..error("HKLM folder")
+        });
+
+        snapshot
+            .hklm_folder_types
+            .types
+            .insert("folder2".into(), hklm_folder);
+
+        snapshot.advanced.read_errors.push(error("Advanced"));
+
+        for domain in [
+            &mut snapshot.bags,
+            &mut snapshot.streams,
+            &mut snapshot.clsid,
+            &mut snapshot.policies,
+        ] {
+            let mut root = KeySnapshot::default();
+            let mut child = KeySnapshot::default();
+
+            child.read_errors.push(error("root\\child"));
+
+            root.subkeys.insert("root\\child".into(), child);
+
+            domain.insert("root".into(), root);
+        }
+
+        assert_eq!(count_inspection_errors(&snapshot), 10);
+
+        let mut bytes = Vec::new();
+
+        write_snapshot_summary(&snapshot, &mut bytes).unwrap();
+
+        let output = String::from_utf8(bytes).unwrap();
+
+        assert!(output.lines().any(|line| line == "Errors: 10"));
+
+        assert!(output.lines().any(|line| line == "Bags: 1 top-level keys"));
+    }
+
+    #[test]
+    fn human_summary_does_not_double_count_failed_values() {
+        let mut snapshot = InspectionSnapshot::default();
+
+        snapshot.advanced.values.insert(
+            "MissingValue".into(),
+            ValueReadResult::Failure(ReadError::ValueNotFound {
+                name: "MissingValue".into(),
+            }),
+        );
+
+        assert_eq!(count_inspection_errors(&snapshot), 0);
+
+        snapshot.advanced.values.insert(
+            "DeniedValue".into(),
+            ValueReadResult::Failure(ReadError::AccessDenied {
+                path: "Advanced".into(),
+            }),
+        );
+
+        snapshot.advanced.read_errors.push(InspectionError {
+            key_path: "Advanced".into(),
+            root: RootKey::Hkcu,
+            operation: "get_value".into(),
+            error: "DeniedValue: Access denied".into(),
+        });
+
+        assert_eq!(count_inspection_errors(&snapshot), 1);
+
+        let mut bytes = Vec::new();
+
+        write_snapshot_summary(&snapshot, &mut bytes).unwrap();
+
+        let output = String::from_utf8(bytes).unwrap();
+
+        assert!(output.lines().any(|line| line == "Errors: 1"));
+
+        assert!(output
+            .lines()
+            .any(|line| line == "Advanced: 2 value observations"));
+    }
+
+    #[test]
+    fn human_summary_preserves_inspection_status() {
+        let statuses = [
+            InspectionStatus::Complete,
+            InspectionStatus::Partial {
+                reason: "injected partial result".into(),
+            },
+            InspectionStatus::Failed {
+                error: "injected failure".into(),
+            },
+        ];
+
+        for status in statuses {
+            let snapshot = InspectionSnapshot {
+                status: status.clone(),
+                ..Default::default()
+            };
+
+            let mut bytes = Vec::new();
+
+            write_snapshot_summary(&snapshot, &mut bytes).unwrap();
+
+            let output = String::from_utf8(bytes).unwrap();
+
+            let expected = format!("Status: {:?}", status);
+
+            assert!(output.lines().any(|line| line == expected));
+
+            assert!(output.contains("WinViewRs Inspection Snapshot"));
+        }
+    }
+
+    #[test]
+    fn human_summary_propagates_io_errors() {
+        struct FailingWriter {
+            fail_on_flush: bool,
+        }
+
+        impl Write for FailingWriter {
+            fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+                if self.fail_on_flush {
+                    Ok(buffer.len())
+                } else {
+                    Err(io::Error::other("injected write failure"))
+                }
+            }
+
+            fn flush(&mut self) -> io::Result<()> {
+                Err(io::Error::other("injected flush failure"))
+            }
+        }
+
+        let snapshot = InspectionSnapshot::default();
+
+        for (fail_on_flush, expected) in [
+            (false, "injected write failure"),
+            (true, "injected flush failure"),
+        ] {
+            let error = write_snapshot_summary(&snapshot, FailingWriter { fail_on_flush })
+                .expect_err("I/O failure must propagate");
+
+            assert!(error.to_string().contains(expected));
+        }
     }
 }
