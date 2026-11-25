@@ -504,7 +504,18 @@ mod tests {
         browser.select_root(RootKey::Hklm);
         assert_eq!(browser.root, RootKey::Hklm);
 
+        // Selecting the same hive preserves page, selected GUID, and view index.
+        browser.select_page(2, index.hklm.len());
         browser.select_folder("GUID-A");
+        browser.view_index = 7;
+        let page_before = browser.page;
+        let guid_before = browser.selected_guid.clone();
+        let view_before = browser.view_index;
+        browser.select_root(RootKey::Hklm);
+        assert_eq!(browser.root, RootKey::Hklm);
+        assert_eq!(browser.page, page_before);
+        assert_eq!(browser.selected_guid, guid_before);
+        assert_eq!(browser.view_index, view_before);
         browser.select_folder("NONEXISTENT");
         assert!(browser.selected_folder(&snapshot).is_none());
     }

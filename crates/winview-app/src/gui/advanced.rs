@@ -280,14 +280,6 @@ mod tests {
 
     #[test]
     fn advanced_rows_reject_unexpected_value_types() {
-        let names = [
-            HIDE_FILE_EXT,
-            USE_COMPACT_MODE,
-            AUTO_CHECK_SELECT,
-            HIDDEN,
-            LAUNCH_TO,
-            FULL_ROW_SELECT,
-        ];
         // String, Qword, Binary, MultiString, inconsistent raw_type_id, missing decoded
         let mut snapshot = empty_snapshot();
         // String
@@ -409,10 +401,13 @@ mod tests {
         });
 
         let before = count_key_read_errors(&snapshot);
+        let before_json = serde_json::to_string(&snapshot).unwrap();
         let rows = advanced_rows(&snapshot);
         let after = count_key_read_errors(&snapshot);
+        let after_json = serde_json::to_string(&snapshot).unwrap();
         assert_eq!(before, 1);
         assert_eq!(after, 1);
+        assert_eq!(before_json, after_json);
 
         assert_eq!(rows[0].status, "Captured");
         assert_eq!(rows[1].status, "Value not found");

@@ -162,7 +162,7 @@ Current GUI state:
 - Captured TopViews settings shown per view (LogicalViewMode, Mode, IconSize, GroupBy, etc.).
 - Explicit distinction between unavailable values and captured values (including empty strings).
 - These records are captured registry snapshots, not necessarily the effective settings Explorer applies.
-- Advanced settings and other registry-domain detail browsers remain unimplemented.
+- Advanced settings browser with seven supported settings (HideFileExt, UseCompactMode, AutoCheckSelect, Hidden, LaunchTo, FullRowSelect, NoStrCmpLogical), numeric DWORD values, distinct read and decoding statuses, and read-only behavior.
 - No configuration editing is supported.
 
 ## Known limitations
