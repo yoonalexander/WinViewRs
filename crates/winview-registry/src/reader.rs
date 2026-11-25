@@ -4354,4 +4354,207 @@ mod depth_tests {
 
         assert!(matches!(snapshot.status, InspectionStatus::Partial { .. }));
     }
+
+    #[test]
+    fn failed_key_open_without_observations_is_failed() {
+        let reader = FakeReader::new(BTreeMap::new());
+
+        let (snapshot, _) = inspect_test_tree(&reader, MAX_KEYS_PER_DOMAIN);
+
+        let root = snapshot
+            .bags
+            .get("root")
+            .expect("root error snapshot missing");
+
+        assert_eq!(root.read_errors.len(), 1);
+        assert_eq!(root.read_errors[0].operation, "open_key");
+
+        assert!(!snapshot_has_successful_observations(&snapshot));
+        assert_eq!(count_snapshot_read_errors(&snapshot), 1);
+
+        assert!(matches!(
+            snapshot.status,
+            InspectionStatus::Failed { error }
+                if error == "Inspection failed with 1 errors"
+        ));
+    }
+
+    #[test]
+    fn nested_successful_observation_produces_partial_status() {
+        let reader = build_hierarchy(1).with_value_failure(
+            "root",
+            "TestValue",
+            InjectedValueFailure::AccessDenied,
+        );
+
+        let (snapshot, _) = inspect_test_tree(&reader, MAX_KEYS_PER_DOMAIN);
+
+        let root = snapshot.bags.get("root").expect("root missing");
+
+        assert!(matches!(
+            root.values.get("TestValue"),
+            Some(ValueReadResult::Failure(ReadError::AccessDenied { .. }))
+        ));
+
+        let child = root.subkeys.get(r"root\child").expect("child missing");
+
+        assert!(matches!(
+            child.values.get("TestValue"),
+            Some(ValueReadResult::Success(_))
+        ));
+
+        assert!(snapshot_has_successful_observations(&snapshot));
+        assert_eq!(count_snapshot_read_errors(&snapshot), 1);
+
+        assert!(matches!(snapshot.status, InspectionStatus::Partial { .. }));
+    }
+
+    #[test]
+    fn advanced_optional_absence_without_errors_is_complete() {
+        use winview_core::registry::keys::paths::ADVANCED;
+        use winview_core::test_support::{FakeRegistryKey, FakeRegistryReader};
+
+        let reader = FakeRegistryReader::new();
+
+        reader.insert_key(RootKey::Hkcu, ADVANCED, FakeRegistryKey::new());
+
+        let mut snapshot = InspectionSnapshot::default();
+        let mut snapshot_budget = SnapshotBudget::new(MAX_SNAPSHOT_BYTES);
+
+        inspect_advanced(
+            &reader,
+            &mut snapshot,
+            MAX_VALUE_BYTES,
+            &mut snapshot_budget,
+        );
+
+        finalize_inspection_status(&mut snapshot);
+
+        assert_eq!(snapshot.advanced.values.len(), 7);
+
+        assert!(snapshot.advanced.values.values().all(|value| matches!(
+            value,
+            ValueReadResult::Failure(ReadError::ValueNotFound { .. })
+        )));
+
+        assert!(!snapshot_has_successful_observations(&snapshot));
+        assert_eq!(count_snapshot_read_errors(&snapshot), 0);
+
+        assert!(matches!(snapshot.status, InspectionStatus::Complete));
+    }
+
+    #[test]
+    fn undecoded_raw_observation_counts_as_success() {
+        let cases = [
+            (0u32, vec![1u8, 2, 3], DecodingStatus::UnknownType),
+            (
+                4u32,
+                vec![1u8, 2],
+                DecodingStatus::Malformed {
+                    reason: "invalid DWORD length".into(),
+                },
+            ),
+            (0u32, Vec::new(), DecodingStatus::UnknownType),
+        ];
+
+        for (type_id, bytes, status) in cases {
+            let mut data = BTreeMap::new();
+            data.insert("root".to_string(), Vec::new());
+
+            let mut values = FakeValues::new();
+
+            values.entry("root".to_string()).or_default().insert(
+                "TestValue".to_string(),
+                (
+                    type_id,
+                    bytes.clone(),
+                    Some(RegistryValue::Binary(bytes.clone())),
+                    status.clone(),
+                ),
+            );
+
+            let reader = FakeReader::with_values(data, values);
+
+            let (mut snapshot, _) = inspect_test_tree(&reader, MAX_KEYS_PER_DOMAIN);
+
+            let root = snapshot.bags.get("root").expect("root missing");
+
+            match root.values.get("TestValue") {
+                Some(ValueReadResult::Success(raw)) => {
+                    assert_eq!(raw.raw_bytes, bytes);
+                    assert_eq!(raw.decoded, None);
+                    assert_eq!(raw.decoding_status, status);
+                }
+                _ => panic!("expected successful raw observation"),
+            }
+
+            assert!(snapshot_has_successful_observations(&snapshot));
+
+            snapshot.errors.push(InspectionError {
+                key_path: "other".into(),
+                root: RootKey::Hkcu,
+                operation: "open_key".into(),
+                error: "injected failure".into(),
+            });
+
+            finalize_inspection_status(&mut snapshot);
+
+            assert!(matches!(snapshot.status, InspectionStatus::Partial { .. }));
+        }
+    }
+
+    #[test]
+    fn canonical_name_only_counts_as_success() {
+        let view_path = format!(
+            r"{}\{}\TopViews\{}",
+            TEST_FOLDER_TYPES, TEST_FOLDER_GUID, TEST_VIEW_GUID,
+        );
+
+        let reader = build_folder_types_fixture(Some("A"), false).with_value_failure(
+            &view_path,
+            "Mode",
+            InjectedValueFailure::AccessDenied,
+        );
+
+        let mut snapshot = InspectionSnapshot::default();
+
+        let mut snapshot_budget = SnapshotBudget::new(MAX_SNAPSHOT_BYTES);
+
+        inspect_folder_types_hive(
+            &reader,
+            RootKey::Hkcu,
+            TEST_FOLDER_TYPES,
+            ObservationSource::HkcuFolderTypes,
+            &mut snapshot.hkcu_folder_types,
+            MAX_VALUE_BYTES,
+            &mut snapshot_budget,
+        );
+
+        finalize_inspection_status(&mut snapshot);
+
+        let folder = snapshot
+            .hkcu_folder_types
+            .types
+            .get(TEST_FOLDER_GUID)
+            .expect("folder missing");
+
+        assert_eq!(folder.canonical_name.as_deref(), Some("A"));
+
+        let view = folder.top_views.get(TEST_VIEW_GUID).expect("view missing");
+
+        assert!(matches!(
+            view.raw_values.get("Mode"),
+            Some(ValueReadResult::Failure(ReadError::AccessDenied { .. }))
+        ));
+
+        assert!(!view
+            .raw_values
+            .values()
+            .any(|value| matches!(value, ValueReadResult::Success(_))));
+
+        assert!(snapshot_has_successful_observations(&snapshot));
+        assert_eq!(count_snapshot_read_errors(&snapshot), 1);
+
+        assert!(matches!(snapshot.status, InspectionStatus::Partial { .. }));
+    }
 }
