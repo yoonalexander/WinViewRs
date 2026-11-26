@@ -10,6 +10,9 @@ use winview_core::inspection::{
 
 use winview_core::model::{DetectionMethod, InspectionSnapshot, KeySnapshot, SnapshotMetadata};
 
+use super::style::{helpers, StatusKind};
+
+#[derive(Clone)]
 pub(super) struct DomainOverview {
     pub(super) name: &'static str,
     pub(super) count: usize,
@@ -17,6 +20,7 @@ pub(super) struct DomainOverview {
     pub(super) errors: usize,
 }
 
+#[derive(Clone)]
 pub(super) struct InspectionOverview {
     pub(super) metadata: [(&'static str, String); 5],
 
@@ -49,7 +53,7 @@ fn metadata_rows(metadata: &SnapshotMetadata) -> [(&'static str, String); 5] {
 
     [
         (
-            "Product name",
+            "Registry product name",
             optional_text(metadata.windows_product_name.as_deref()),
         ),
         ("Windows build", optional_number(metadata.windows_build)),
@@ -105,33 +109,178 @@ impl InspectionOverview {
     }
 }
 
-pub(super) fn show_overview(ui: &mut egui::Ui, overview: &InspectionOverview) {
-    ui.separator();
+/// Windows family classification for presentation only.
+/// Does not modify captured metadata.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WindowsFamily {
+    Windows11,
+    Windows10,
+    WindowsServer,
+    Unknown,
+}
 
-    if !overview.has_observations {
-        ui.label("No successful registry observations were captured.");
+/// Recognized Windows 11 client builds for conservative classification.
+const WINDOWS_11_CLIENT_BUILDS: &[u32] = &[22000, 22621, 22631, 26100, 26200];
+
+/// Determines the Windows family for display purposes only.
+/// Returns the raw product name unchanged when uncertain.
+fn infer_windows_family(
+    build: Option<u32>,
+    product_name: Option<&str>,
+) -> (WindowsFamily, Option<&'static str>) {
+    let Some(build) = build else {
+        return (WindowsFamily::Unknown, None);
+    };
+
+    let is_windows_11_build = WINDOWS_11_CLIENT_BUILDS.contains(&build);
+
+    let product_lower = product_name.map(|s| s.to_lowercase());
+    let is_server = product_lower
+        .as_deref()
+        .map_or(false, |s| s.contains("server"));
+    let is_windows_10 = product_lower
+        .as_deref()
+        .map_or(false, |s| s.contains("windows 10"));
+    let is_windows_11_product = product_lower
+        .as_deref()
+        .map_or(false, |s| s.contains("windows 11"));
+
+    // Conservative classification: only recognize known client builds
+    if is_windows_11_build && !is_server {
+        (WindowsFamily::Windows11, Some("Windows 11"))
+    } else if is_windows_10 && !is_server {
+        (WindowsFamily::Windows10, Some("Windows 10"))
+    } else if is_server {
+        (WindowsFamily::WindowsServer, Some("Windows Server"))
+    } else if is_windows_11_product && !is_server {
+        // Product name says Windows 11 but build not in known list - uncertain
+        (WindowsFamily::Unknown, None)
+    } else {
+        (WindowsFamily::Unknown, None)
+    }
+}
+
+pub(super) fn show_overview(ui: &mut egui::Ui, overview: &InspectionOverview) {
+    let colors = super::style::ThemeColors::from_style(&ui.style());
+
+    // Summary cards
+    ui.horizontal_wrapped(|ui| {
+        ui.set_min_width(200.0);
+
+        // Inspection status card
+        let status_text = match overview.metadata[3].1.as_str() {
+            "RtlGetVersion" | "Registry fallback" => "Complete",
+            _ => "Failed",
+        };
+        let status_kind = if status_text == "Complete" {
+            StatusKind::Success
+        } else {
+            StatusKind::Error
+        };
+        helpers::summary_card(
+            ui,
+            "Inspection status",
+            status_text,
+            Some(&overview.metadata[3].1),
+        );
+
+        // Total errors card
+        let error_kind = if overview.global_errors > 0 {
+            StatusKind::Warning
+        } else {
+            StatusKind::Success
+        };
+        helpers::summary_card(
+            ui,
+            "Recorded errors",
+            &overview.global_errors.to_string(),
+            Some("Global inspection errors"),
+        );
+
+        // Folder types card
+        let total_folders = overview.domains[0].count + overview.domains[1].count;
+        helpers::summary_card(
+            ui,
+            "Folder types captured",
+            &total_folders.to_string(),
+            Some(&format!(
+                "HKCU: {} | HKLM: {}",
+                overview.domains[0].count, overview.domains[1].count
+            )),
+        );
+    });
+
+    ui.add_space(16.0);
+
+    // Windows information section
+    helpers::section_heading(ui, "Windows information");
+
+    // Windows family inference
+    let build = overview.metadata[1].1.parse::<u32>().ok();
+    let product_name = if overview.metadata[0].1 != "Unavailable" {
+        Some(overview.metadata[0].1.as_str())
+    } else {
+        None
+    };
+    let (family, family_label) = infer_windows_family(build, product_name);
+
+    if let Some(label) = family_label {
+        ui.horizontal(|ui| {
+            ui.strong("Windows family:");
+            ui.add_space(8.0);
+            helpers::status_badge(
+                ui,
+                label,
+                match family {
+                    WindowsFamily::Windows11 => StatusKind::Success,
+                    _ => StatusKind::Info,
+                },
+            );
+            if family == WindowsFamily::Windows11
+                && product_name.map_or(false, |p| p.to_lowercase().contains("windows 10"))
+            {
+                ui.add_space(8.0);
+                ui.label(
+                    egui::RichText::new("(Registry product name differs)")
+                        .size(12.0)
+                        .italics()
+                        .color(colors.text_secondary),
+                );
+            }
+        });
+        ui.add_space(8.0);
     }
 
-    ui.heading("Windows information");
-
+    // Metadata table
     egui::Grid::new("inspection_metadata")
         .num_columns(2)
         .striped(true)
+        .min_col_width(180.0)
         .show(ui, |ui| {
             for (label, value) in &overview.metadata {
-                ui.label(*label);
-                ui.label(value.as_str());
+                ui.label(
+                    egui::RichText::new(*label)
+                        .size(13.0)
+                        .color(colors.text_secondary),
+                );
+                ui.label(
+                    egui::RichText::new(value.as_str())
+                        .size(13.0)
+                        .color(colors.text),
+                );
                 ui.end_row();
             }
         });
 
-    ui.add_space(12.0);
+    ui.add_space(16.0);
 
-    ui.heading("Inspection domains");
+    // Inspection domains table
+    helpers::section_heading(ui, "Inspection domains");
 
     egui::Grid::new("inspection_domains")
         .num_columns(3)
         .striped(true)
+        .min_col_width(120.0)
         .show(ui, |ui| {
             ui.strong("Domain");
             ui.strong("Captured entries");
@@ -139,24 +288,54 @@ pub(super) fn show_overview(ui: &mut egui::Ui, overview: &InspectionOverview) {
             ui.end_row();
 
             for domain in &overview.domains {
-                ui.label(domain.name);
-                ui.label(format!("{} {}", domain.count, domain.unit));
-                ui.label(domain.errors.to_string());
+                ui.label(
+                    egui::RichText::new(domain.name)
+                        .size(13.0)
+                        .color(colors.text),
+                );
+                ui.label(
+                    egui::RichText::new(format!("{} {}", domain.count, domain.unit))
+                        .size(13.0)
+                        .color(colors.text),
+                );
+                let error_color = if domain.errors > 0 {
+                    colors.warning
+                } else {
+                    colors.success
+                };
+                ui.label(
+                    egui::RichText::new(domain.errors.to_string())
+                        .size(13.0)
+                        .color(error_color)
+                        .strong(),
+                );
                 ui.end_row();
             }
         });
 
-    ui.label(format!(
-        "Global inspection errors: {}",
-        overview.global_errors,
-    ));
+    ui.add_space(8.0);
+
+    // Global errors summary
+    let error_kind = if overview.global_errors > 0 {
+        StatusKind::Warning
+    } else {
+        StatusKind::Success
+    };
+    helpers::status_badge(
+        ui,
+        &format!("Global inspection errors: {}", overview.global_errors),
+        error_kind,
+    );
 
     ui.add_space(8.0);
 
     ui.small(
-        "Counts describe captured snapshot records. \
-         They may include failed reads, overlapping \
-         registry roots, or incomplete data.",
+        egui::RichText::new(
+            "Counts describe captured snapshot records. \
+             They may include failed reads, overlapping \
+             registry roots, or incomplete data.",
+        )
+        .color(colors.text_secondary),
     );
 }
 
@@ -332,5 +511,67 @@ mod tests {
 
         assert!(overview.has_observations);
         assert_eq!(overview.domains[0].count, 1);
+    }
+
+    #[test]
+    fn infer_windows_family_recognizes_windows_11_builds() {
+        let (family, label) = infer_windows_family(Some(22000), Some("Windows 10 Pro"));
+        assert_eq!(family, WindowsFamily::Windows11);
+        assert_eq!(label, Some("Windows 11"));
+
+        let (family, label) = infer_windows_family(Some(22621), Some("Windows 10 Pro"));
+        assert_eq!(family, WindowsFamily::Windows11);
+        assert_eq!(label, Some("Windows 11"));
+
+        let (family, label) = infer_windows_family(Some(22631), Some("Windows 10 Pro"));
+        assert_eq!(family, WindowsFamily::Windows11);
+        assert_eq!(label, Some("Windows 11"));
+
+        let (family, label) = infer_windows_family(Some(26100), Some("Windows 10 Pro"));
+        assert_eq!(family, WindowsFamily::Windows11);
+        assert_eq!(label, Some("Windows 11"));
+
+        let (family, label) = infer_windows_family(Some(26200), Some("Windows 10 Pro"));
+        assert_eq!(family, WindowsFamily::Windows11);
+        assert_eq!(label, Some("Windows 11"));
+    }
+
+    #[test]
+    fn infer_windows_family_recognizes_windows_10() {
+        let (family, label) = infer_windows_family(Some(19045), Some("Windows 10 Pro"));
+        assert_eq!(family, WindowsFamily::Windows10);
+        assert_eq!(label, Some("Windows 10"));
+    }
+
+    #[test]
+    fn infer_windows_family_recognizes_server() {
+        let (family, label) = infer_windows_family(Some(20348), Some("Windows Server 2022"));
+        assert_eq!(family, WindowsFamily::WindowsServer);
+        assert_eq!(label, Some("Windows Server"));
+
+        let (family, label) = infer_windows_family(Some(26100), Some("Windows Server 2025"));
+        assert_eq!(family, WindowsFamily::WindowsServer);
+        assert_eq!(label, Some("Windows Server"));
+    }
+
+    #[test]
+    fn infer_windows_family_uncertain_returns_unknown() {
+        // High build not in known list
+        let (family, label) = infer_windows_family(Some(30000), Some("Windows 11 Enterprise"));
+        assert_eq!(family, WindowsFamily::Unknown);
+        assert_eq!(label, None);
+
+        // Missing build
+        let (family, label) = infer_windows_family(None, Some("Windows 10 Pro"));
+        assert_eq!(family, WindowsFamily::Unknown);
+        assert_eq!(label, None);
+    }
+
+    #[test]
+    fn infer_windows_family_does_not_misclassify_server() {
+        // Server build not in client list
+        let (family, label) = infer_windows_family(Some(22621), Some("Windows Server 2022"));
+        assert_eq!(family, WindowsFamily::WindowsServer);
+        assert_eq!(label, Some("Windows Server"));
     }
 }

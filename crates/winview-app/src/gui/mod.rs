@@ -19,6 +19,8 @@ pub mod overview;
 #[cfg(feature = "gui")]
 mod registry_browser;
 #[cfg(feature = "gui")]
+mod style;
+#[cfg(feature = "gui")]
 mod value_details;
 
 #[cfg(feature = "gui")]

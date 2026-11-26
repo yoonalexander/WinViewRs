@@ -1,8 +1,13 @@
+// winview-app/src/gui/advanced.rs
+
 use eframe::egui;
 
 use winview_core::model::{DecodingStatus, KeySnapshot, ReadError, RegistryValue, ValueReadResult};
 
 use winview_core::registry::keys::{advanced_values::*, paths::ADVANCED};
+
+use super::style::helpers;
+use super::style::{StatusKind, ThemeColors, WIDE_WINDOW_THRESHOLD};
 
 const SETTINGS: [(&str, &str); 7] = [
     (HIDE_FILE_EXT, "File name extensions"),
@@ -86,58 +91,56 @@ impl AdvancedBrowser {
     }
 
     pub(super) fn show(&mut self, ui: &mut egui::Ui, advanced: &KeySnapshot) {
-        ui.heading("Advanced Explorer settings");
+        let colors = ThemeColors::from_style(&ui.style());
+        let available_width = ui.available_width();
+        let is_wide = available_width >= WIDE_WINDOW_THRESHOLD;
 
-        ui.label(format!("HKCU\\{ADVANCED}"));
+        helpers::section_heading(ui, "Advanced Explorer settings");
 
-        ui.label(format!(
-            "Key-level recorded errors: {}",
-            advanced.read_errors.len()
-        ));
+        ui.label(
+            egui::RichText::new(format!("HKCU\\{ADVANCED}"))
+                .size(12.0)
+                .color(colors.text_secondary),
+        );
+
+        ui.label(
+            egui::RichText::new(format!(
+                "Key-level recorded errors: {}",
+                advanced.read_errors.len()
+            ))
+            .size(12.0)
+            .color(colors.text_secondary),
+        );
 
         ui.small(
-            "Recorded registry values only. \
-             These may not represent effective \
-             Explorer settings.",
+            egui::RichText::new(
+                "Recorded registry values only. \
+                 These may not represent effective \
+                 Explorer settings.",
+            )
+            .color(colors.text_secondary),
         );
 
         ui.add_space(8.0);
 
-        egui::Grid::new("advanced_settings_grid")
-            .num_columns(3)
-            .striped(true)
-            .show(ui, |ui| {
-                ui.strong("Setting");
-                ui.strong("Value");
-                ui.strong("Read status");
-
-                ui.end_row();
-
-                for row in advanced_rows(advanced) {
-                    ui.vertical(|ui| {
-                        let selected = self.selected_value == Some(row.name);
-
-                        if ui.selectable_label(selected, row.label).clicked() {
-                            self.select_value(row.name);
-                        }
-
-                        ui.small(row.name);
-                    });
-
-                    ui.label(row.value);
-                    ui.label(row.status);
-
-                    ui.end_row();
-                }
-            });
+        if is_wide {
+            // Wide layout: three columns with explicit widths
+            self.show_wide_table(ui, advanced);
+        } else {
+            // Narrow layout: stacked cards
+            self.show_narrow_cards(ui, advanced);
+        }
 
         ui.add_space(8.0);
 
         ui.small(
-            "Not captured may indicate an absent key, \
-             an inspection limitation, or an omitted \
-             observation. Missing values do not \
-             imply disabled settings.",
+            egui::RichText::new(
+                "Not captured may indicate an absent key, \
+                 an inspection limitation, or an omitted \
+                 observation. Missing values do not \
+                 imply disabled settings.",
+            )
+            .color(colors.text_secondary),
         );
 
         if let Some(name) = self.selected_value {
@@ -147,19 +150,187 @@ impl AdvancedBrowser {
                 }
 
                 None => {
+                    ui.add_space(8.0);
                     ui.separator();
-                    ui.heading("Value details");
+                    ui.add_space(8.0);
+                    helpers::section_heading(ui, "Value details");
                     ui.label(name);
-                    ui.label("No raw observation was captured for this setting.");
+                    ui.label(
+                        egui::RichText::new("No raw observation was captured for this setting.")
+                            .size(13.0)
+                            .color(colors.text_secondary),
+                    );
                 }
             }
         }
 
-        self.error_pager.show(
-            ui,
-            "Advanced key inspection error details",
-            &advanced.read_errors,
-        );
+        self.error_pager
+            .show(ui, "Advanced key inspection errors", &advanced.read_errors);
+    }
+
+    fn show_wide_table(&mut self, ui: &mut egui::Ui, advanced: &KeySnapshot) {
+        // Use a grid with constrained column widths
+        egui::Grid::new("advanced_settings_grid")
+            .num_columns(3)
+            .striped(true)
+            .min_col_width(0.0)
+            .show(ui, |ui| {
+                // Header row with explicit widths
+                ui.allocate_ui_with_layout(
+                    egui::vec2(ui.available_width() * 0.5, 0.0),
+                    egui::Layout::left_to_right(egui::Align::Center),
+                    |ui| {
+                        ui.strong("Setting");
+                    },
+                );
+                ui.allocate_ui_with_layout(
+                    egui::vec2(ui.available_width() * 0.2, 0.0),
+                    egui::Layout::left_to_right(egui::Align::Center),
+                    |ui| {
+                        ui.strong("Captured value");
+                    },
+                );
+                ui.allocate_ui_with_layout(
+                    egui::vec2(ui.available_width() * 0.3, 0.0),
+                    egui::Layout::left_to_right(egui::Align::Center),
+                    |ui| {
+                        ui.strong("Read status");
+                    },
+                );
+                ui.end_row();
+
+                for row in advanced_rows(advanced) {
+                    // Setting column (50%)
+                    ui.allocate_ui_with_layout(
+                        egui::vec2(ui.available_width() * 0.5, 0.0),
+                        egui::Layout::left_to_right(egui::Align::Center),
+                        |ui| {
+                            let selected = self.selected_value == Some(row.name);
+
+                            if ui
+                                .selectable_label(
+                                    selected,
+                                    egui::RichText::new(row.label).size(13.0),
+                                )
+                                .clicked()
+                            {
+                                self.select_value(row.name);
+                            }
+
+                            ui.add_space(8.0);
+                            ui.label(
+                                egui::RichText::new(row.name)
+                                    .size(11.0)
+                                    .color(ThemeColors::from_style(&ui.style()).text_secondary),
+                            );
+                        },
+                    );
+
+                    // Value column (20%)
+                    ui.allocate_ui_with_layout(
+                        egui::vec2(ui.available_width() * 0.2, 0.0),
+                        egui::Layout::left_to_right(egui::Align::Center),
+                        |ui| {
+                            let value_color = if row.value == "Unavailable" {
+                                ThemeColors::from_style(&ui.style()).text_secondary
+                            } else {
+                                ThemeColors::from_style(&ui.style()).text
+                            };
+                            ui.label(
+                                egui::RichText::new(&row.value)
+                                    .size(13.0)
+                                    .color(value_color),
+                            );
+                        },
+                    );
+
+                    // Status column (30%)
+                    ui.allocate_ui_with_layout(
+                        egui::vec2(ui.available_width() * 0.3, 0.0),
+                        egui::Layout::left_to_right(egui::Align::Center),
+                        |ui| {
+                            let status_color = match row.status {
+                                "Captured" => ThemeColors::from_style(&ui.style()).success,
+                                "Not captured" => {
+                                    ThemeColors::from_style(&ui.style()).text_secondary
+                                }
+                                _ => ThemeColors::from_style(&ui.style()).warning,
+                            };
+                            ui.label(
+                                egui::RichText::new(row.status)
+                                    .size(13.0)
+                                    .color(status_color),
+                            );
+                        },
+                    );
+
+                    ui.end_row();
+                }
+            });
+    }
+
+    fn show_narrow_cards(&mut self, ui: &mut egui::Ui, advanced: &KeySnapshot) {
+        let colors = ThemeColors::from_style(&ui.style());
+
+        for row in advanced_rows(advanced) {
+            let selected = self.selected_value == Some(row.name);
+
+            egui::Frame::new()
+                .fill(colors.panel_background)
+                .stroke(egui::Stroke::new(1.0, colors.border))
+                .corner_radius(egui::CornerRadius::same(6))
+                .inner_margin(egui::Margin::symmetric(12, 10))
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        let selectable = ui.selectable_label(
+                            selected,
+                            egui::RichText::new(row.label).size(14.0).strong(),
+                        );
+                        if selectable.clicked() {
+                            self.select_value(row.name);
+                        }
+
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            let status_color = match row.status {
+                                "Captured" => colors.success,
+                                "Not captured" => colors.text_secondary,
+                                _ => colors.warning,
+                            };
+                            ui.label(
+                                egui::RichText::new(row.status)
+                                    .size(12.0)
+                                    .color(status_color)
+                                    .strong(),
+                            );
+                        });
+                    });
+
+                    ui.add_space(4.0);
+
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            egui::RichText::new(row.name)
+                                .size(11.0)
+                                .color(colors.text_secondary)
+                                .monospace(),
+                        );
+                        ui.add_space(8.0);
+
+                        let value_color = if row.value == "Unavailable" {
+                            colors.text_secondary
+                        } else {
+                            colors.text
+                        };
+                        ui.label(
+                            egui::RichText::new(&row.value)
+                                .size(13.0)
+                                .color(value_color),
+                        );
+                    });
+                });
+
+            ui.add_space(8.0);
+        }
     }
 }
 

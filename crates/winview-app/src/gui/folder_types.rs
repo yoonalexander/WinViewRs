@@ -9,11 +9,16 @@ use winview_core::model::{
 use winview_core::RootKey;
 
 use super::diagnostics::ErrorPager;
+use super::style::helpers;
+use super::style::{
+    StatusKind, FOLDER_LIST_MAX_WIDTH, FOLDER_LIST_MIN_WIDTH, FOLDER_LIST_WIDTH,
+    WIDE_WINDOW_THRESHOLD,
+};
 
 const FOLDERS_PER_PAGE: usize = 25;
 const TEXT_PREVIEW_CHARS: usize = 160;
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub(super) struct FolderTypesIndex {
     hkcu: Vec<String>,
     hklm: Vec<String>,
@@ -52,6 +57,8 @@ pub(super) struct FolderBrowser {
     selected_value: Option<String>,
     hive_error_pager: ErrorPager,
     folder_error_pager: ErrorPager,
+    search_query: String,
+    filtered_guids: Option<Vec<String>>,
 }
 
 impl Default for FolderBrowser {
@@ -64,6 +71,8 @@ impl Default for FolderBrowser {
             selected_value: None,
             hive_error_pager: ErrorPager::default(),
             folder_error_pager: ErrorPager::default(),
+            search_query: String::new(),
+            filtered_guids: None,
         }
     }
 }
@@ -76,6 +85,8 @@ impl FolderBrowser {
             self.selected_guid = None;
             self.view_index = 0;
             self.selected_value = None;
+            self.search_query.clear();
+            self.filtered_guids = None;
             self.hive_error_pager.reset();
             self.folder_error_pager.reset();
         }
@@ -126,6 +137,54 @@ impl FolderBrowser {
         }
     }
 
+    fn filtered_keys(&self, index: &FolderTypesIndex) -> Vec<String> {
+        if let Some(filtered) = &self.filtered_guids {
+            filtered.clone()
+        } else {
+            index.keys(self.root).to_vec()
+        }
+    }
+
+    fn update_search(
+        &mut self,
+        query: String,
+        index: &FolderTypesIndex,
+        snapshot: &InspectionSnapshot,
+    ) {
+        let trimmed = query.trim().to_lowercase();
+
+        if trimmed.is_empty() {
+            self.search_query.clear();
+            self.filtered_guids = None;
+        } else {
+            self.search_query = trimmed.clone();
+            let folder_types = folder_types_for_root(snapshot, self.root);
+            let keys = index.keys(self.root);
+            let filtered: Vec<String> = keys
+                .iter()
+                .filter(|guid| {
+                    let guid_lower = guid.to_lowercase();
+                    let matches_guid = guid_lower.contains(&trimmed);
+                    let matches_name = folder_types
+                        .types
+                        .get(*guid)
+                        .and_then(|f| f.canonical_name.as_deref())
+                        .map(|name| name.to_lowercase().contains(&trimmed))
+                        .unwrap_or(false);
+                    matches_guid || matches_name
+                })
+                .cloned()
+                .collect();
+            self.filtered_guids = Some(filtered);
+        }
+
+        self.page = 0;
+        self.selected_guid = None;
+        self.view_index = 0;
+        self.selected_value = None;
+        self.folder_error_pager.reset();
+    }
+
     fn selected_folder<'a>(
         &self,
         snapshot: &'a InspectionSnapshot,
@@ -141,48 +200,115 @@ impl FolderBrowser {
         snapshot: &InspectionSnapshot,
         index: &FolderTypesIndex,
     ) {
-        ui.heading("FolderTypes");
+        let colors = super::style::ThemeColors::from_style(&ui.style());
+        let available_width = ui.available_width();
+        let is_wide = available_width >= WIDE_WINDOW_THRESHOLD;
 
+        helpers::section_heading(ui, "Folder types");
+
+        // Hive selector
         ui.horizontal(|ui| {
-            if ui
-                .selectable_label(self.root == RootKey::Hklm, "HKLM - System")
-                .clicked()
-            {
+            let hklm_selected = self.root == RootKey::Hklm;
+            if helpers::nav_item_small(ui, hklm_selected, "System defaults (HKLM)").clicked() {
                 self.select_root(RootKey::Hklm);
             }
 
-            if ui
-                .selectable_label(self.root == RootKey::Hkcu, "HKCU - User")
-                .clicked()
-            {
+            let hkcu_selected = self.root == RootKey::Hkcu;
+            if helpers::nav_item_small(ui, hkcu_selected, "User overrides (HKCU)").clicked() {
                 self.select_root(RootKey::Hkcu);
             }
         });
 
-        let keys = index.keys(self.root);
+        ui.add_space(8.0);
+
+        // Search input
+        ui.horizontal(|ui| {
+            ui.label(
+                egui::RichText::new("Search:")
+                    .size(13.0)
+                    .color(colors.text_secondary),
+            );
+            ui.add_space(8.0);
+            let response = ui.add(
+                egui::TextEdit::singleline(&mut self.search_query)
+                    .hint_text("Filter by canonical name or GUID...")
+                    .desired_width(300.0),
+            );
+            if response.changed() {
+                self.update_search(self.search_query.clone(), index, snapshot);
+            }
+            if response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                self.search_query.clear();
+                self.update_search(String::new(), index, snapshot);
+                response.request_focus();
+            }
+        });
+
+        ui.add_space(8.0);
 
         let folder_types = folder_types_for_root(snapshot, self.root);
+        let keys = self.filtered_keys(index);
 
-        ui.label(format!("{} captured folder-type records", keys.len(),));
+        if self.filtered_guids.is_some() {
+            ui.label(
+                egui::RichText::new(format!(
+                    "{} matching folder-type records (of {} total)",
+                    keys.len(),
+                    index.keys(self.root).len()
+                ))
+                .size(12.0)
+                .color(colors.text_secondary),
+            );
+        } else {
+            ui.label(
+                egui::RichText::new(format!("{} captured folder-type records", keys.len()))
+                    .size(12.0)
+                    .color(colors.text_secondary),
+            );
+        }
 
-        ui.label(format!(
-            "Hive-level inspection errors: {}",
-            folder_types.read_errors.len(),
-        ));
+        ui.label(
+            egui::RichText::new(format!(
+                "Hive-level inspection errors: {}",
+                folder_types.read_errors.len(),
+            ))
+            .size(12.0)
+            .color(colors.text_secondary),
+        );
 
         ui.small(
-            "These are captured registry records, \
-             not necessarily effective Explorer settings.",
+            egui::RichText::new(
+                "These are captured registry records, \
+                 not necessarily effective Explorer settings.",
+            )
+            .color(colors.text_secondary),
         );
 
         self.hive_error_pager.show(
             ui,
-            "FolderTypes hive inspection error details",
+            "FolderTypes hive inspection errors",
             &folder_types.read_errors,
         );
 
         if keys.is_empty() {
-            ui.label("No folder-type records were captured in this hive.");
+            if self.filtered_guids.is_some() {
+                ui.add_space(16.0);
+                ui.vertical_centered(|ui| {
+                    ui.label(
+                        egui::RichText::new("No matching folder-type records found.")
+                            .size(14.0)
+                            .color(colors.text_secondary),
+                    );
+                    ui.add_space(8.0);
+                    ui.label(
+                        egui::RichText::new("Try a different search term or clear the filter.")
+                            .size(12.0)
+                            .color(colors.text_secondary),
+                    );
+                });
+            } else {
+                ui.label("No folder-type records were captured in this hive.");
+            }
 
             return;
         }
@@ -208,45 +334,56 @@ impl FolderBrowser {
                 ui.ctx().request_repaint();
             }
 
-            ui.label(format!("Page {} of {}", self.page + 1, pages,));
+            ui.add_space(16.0);
+            ui.label(
+                egui::RichText::new(format!("Page {} of {}", self.page + 1, pages))
+                    .size(13.0)
+                    .color(colors.text_secondary),
+            );
         });
+
+        ui.add_space(8.0);
 
         let range = self.page_range(keys.len());
 
-        ui.columns(2, |columns| {
-            columns[0].heading("Folder types");
+        if is_wide {
+            // Master-detail layout
+            let list_width = FOLDER_LIST_WIDTH.clamp(FOLDER_LIST_MIN_WIDTH, FOLDER_LIST_MAX_WIDTH);
 
-            for guid in &keys[range] {
-                let Some(folder) = folder_types.types.get(guid) else {
-                    continue;
-                };
-
-                let name = text_or_unavailable(folder.canonical_name.as_deref());
-
-                columns[0].push_id(guid.as_str(), |ui| {
-                    if ui
-                        .selectable_label(
-                            self.selected_guid.as_deref() == Some(guid.as_str()),
-                            name,
-                        )
-                        .clicked()
-                    {
-                        self.select_folder(guid);
-                    }
-
-                    ui.small(guid.as_str());
+            egui::Panel::left("folder_list_panel")
+                .exact_size(list_width)
+                .resizable(false)
+                .show_separator_line(true)
+                .frame(egui::Frame::new().fill(egui::Color32::TRANSPARENT))
+                .show(ui, |ui| {
+                    self.show_folder_list(ui, &keys[range], folder_types);
                 });
-            }
 
-            columns[1].heading("Folder details");
+            egui::CentralPanel::default()
+                .frame(egui::Frame::new().fill(egui::Color32::TRANSPARENT))
+                .show(ui, |ui| {
+                    self.show_details(ui, snapshot);
+                });
+        } else {
+            // Stacked layout
+            egui::ScrollArea::vertical()
+                .id_salt("folder_list_scroll")
+                .max_height(300.0)
+                .show(ui, |ui| {
+                    self.show_folder_list(ui, &keys[range], folder_types);
+                });
 
-            self.show_details(&mut columns[1], snapshot);
-        });
+            ui.add_space(16.0);
+            ui.separator();
+            ui.add_space(8.0);
+
+            self.show_details(ui, snapshot);
+        }
 
         if let Some(folder) = self.selected_folder(snapshot) {
             self.folder_error_pager.show(
                 ui,
-                "Selected folder inspection error details",
+                "Selected folder inspection errors",
                 &folder.read_errors,
             );
         } else {
@@ -254,30 +391,135 @@ impl FolderBrowser {
         }
     }
 
+    fn show_folder_list(
+        &mut self,
+        ui: &mut egui::Ui,
+        guids: &[String],
+        folder_types: &FolderTypesSnapshot,
+    ) {
+        let colors = super::style::ThemeColors::from_style(&ui.style());
+
+        for guid in guids {
+            let Some(folder) = folder_types.types.get(guid) else {
+                continue;
+            };
+
+            let name = text_or_unavailable(folder.canonical_name.as_deref());
+
+            ui.push_id(guid.as_str(), |ui| {
+                let response = ui.allocate_response(
+                    egui::vec2(ui.available_width(), 44.0),
+                    egui::Sense::click(),
+                );
+
+                let selected = self.selected_guid.as_deref() == Some(guid.as_str());
+                let bg = if selected {
+                    colors.accent.gamma_multiply(0.12)
+                } else if response.hovered() {
+                    colors.accent.gamma_multiply(0.06)
+                } else {
+                    egui::Color32::TRANSPARENT
+                };
+
+                if bg != egui::Color32::TRANSPARENT {
+                    ui.painter().rect_filled(response.rect, 6.0, bg);
+                }
+
+                if selected {
+                    ui.painter().rect_stroke(
+                        response.rect,
+                        6.0,
+                        egui::Stroke::new(2.0, colors.accent),
+                        egui::StrokeKind::Outside,
+                    );
+                }
+
+                let text_pos = response.rect.left_top() + egui::vec2(12.0, 8.0);
+                ui.painter().text(
+                    text_pos,
+                    egui::Align2::LEFT_TOP,
+                    &name,
+                    egui::FontId::new(14.0, egui::FontFamily::Proportional),
+                    colors.text,
+                );
+
+                let guid_pos = response.rect.left_top() + egui::vec2(12.0, 26.0);
+                ui.painter().text(
+                    guid_pos,
+                    egui::Align2::LEFT_TOP,
+                    guid.as_str(),
+                    egui::FontId::new(11.0, egui::FontFamily::Monospace),
+                    colors.text_secondary,
+                );
+
+                if response.clicked() {
+                    self.select_folder(guid);
+                }
+            });
+
+            ui.add_space(4.0);
+        }
+    }
+
     fn show_details(&mut self, ui: &mut egui::Ui, snapshot: &InspectionSnapshot) {
+        let colors = super::style::ThemeColors::from_style(&ui.style());
+
         let Some(folder) = self.selected_folder(snapshot) else {
             self.selected_value = None;
 
-            ui.label("Select a folder type to inspect its captured settings.");
+            ui.vertical_centered(|ui| {
+                ui.add_space(60.0);
+                ui.label(
+                    egui::RichText::new("Select a folder type to inspect its captured settings.")
+                        .size(14.0)
+                        .color(colors.text_secondary),
+                );
+            });
 
             return;
         };
 
-        ui.strong(text_or_unavailable(folder.canonical_name.as_deref()));
+        // Folder header
+        ui.horizontal(|ui| {
+            ui.vertical(|ui| {
+                ui.label(
+                    egui::RichText::new(text_or_unavailable(folder.canonical_name.as_deref()))
+                        .size(18.0)
+                        .strong()
+                        .color(colors.text),
+                );
+                ui.label(
+                    egui::RichText::new(format!("GUID: {}", folder.guid))
+                        .size(12.0)
+                        .color(colors.text_secondary),
+                );
+            });
 
-        ui.label(format!("GUID: {}", folder.guid,));
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                helpers::status_badge(
+                    ui,
+                    &format!("Folder errors: {}", folder.read_errors.len()),
+                    if folder.read_errors.is_empty() {
+                        StatusKind::Success
+                    } else {
+                        StatusKind::Warning
+                    },
+                );
+            });
+        });
 
-        ui.label(format!(
-            "Folder-level inspection errors: {}",
-            folder.read_errors.len(),
-        ));
-
+        ui.add_space(8.0);
         ui.separator();
+        ui.add_space(8.0);
 
         if folder.top_views.is_empty() {
             self.selected_value = None;
 
-            ui.label("No TopViews records were captured.");
+            ui.label(
+                egui::RichText::new("No TopViews records were captured.")
+                    .size(13.0)
+                    .color(colors.text_secondary),
+            );
 
             return;
         }
@@ -304,8 +546,15 @@ impl FolderBrowser {
                     ui.ctx().request_repaint();
                 }
 
-                ui.label(format!("View {} of {}", self.view_index + 1, count,));
+                ui.add_space(16.0);
+                ui.label(
+                    egui::RichText::new(format!("View {} of {}", self.view_index + 1, count))
+                        .size(13.0)
+                        .color(colors.text_secondary),
+                );
             });
+
+            ui.add_space(8.0);
         }
 
         let Some((guid, view)) = folder.top_views.iter().nth(self.view_index) else {
@@ -314,27 +563,44 @@ impl FolderBrowser {
             return;
         };
 
-        ui.label(format!("View GUID: {guid}"));
+        ui.label(
+            egui::RichText::new(format!("View GUID: {guid}"))
+                .size(12.0)
+                .color(colors.text_secondary),
+        );
 
+        ui.add_space(8.0);
+
+        // View settings table
         egui::Grid::new("folder_view_details")
             .num_columns(2)
             .striped(true)
+            .min_col_width(180.0)
             .show(ui, |ui| {
                 for (label, value) in view_rows(view) {
                     let selected = self.selected_value.as_deref() == Some(label);
 
-                    if ui.selectable_label(selected, label).clicked() {
+                    if ui
+                        .selectable_label(
+                            selected,
+                            egui::RichText::new(label).size(13.0).color(colors.text),
+                        )
+                        .clicked()
+                    {
                         self.selected_value = Some(label.to_string());
                     }
 
-                    ui.label(value);
+                    ui.label(egui::RichText::new(value).size(13.0).color(colors.text));
                     ui.end_row();
                 }
             });
 
         ui.small(
-            "Unavailable fields may be missing, \
-             unreadable, omitted, or undecodable.",
+            egui::RichText::new(
+                "Unavailable fields may be missing, \
+                 unreadable, omitted, or undecodable.",
+            )
+            .color(colors.text_secondary),
         );
 
         if let Some(name) = self.selected_value.as_deref() {
@@ -343,10 +609,16 @@ impl FolderBrowser {
                     super::value_details::show_value_details(ui, name, observation);
                 }
                 None => {
+                    ui.add_space(8.0);
                     ui.separator();
-                    ui.heading("Value details");
+                    ui.add_space(8.0);
+                    helpers::section_heading(ui, "Value details");
                     ui.label(name);
-                    ui.label("No raw observation was captured for this field.");
+                    ui.label(
+                        egui::RichText::new("No raw observation was captured for this field.")
+                            .size(13.0)
+                            .color(colors.text_secondary),
+                    );
                 }
             }
         }
@@ -382,22 +654,22 @@ fn number_or_unavailable(value: Option<u32>) -> String {
 fn view_rows(view: &ViewSnapshot) -> [(&'static str, String); 9] {
     [
         (
-            "LogicalViewMode",
+            "Logical view mode (LogicalViewMode)",
             number_or_unavailable(view.logical_view_mode),
         ),
         ("Mode", number_or_unavailable(view.mode)),
-        ("IconSize", number_or_unavailable(view.icon_size)),
-        ("GroupBy", text_or_unavailable(view.group_by.as_deref())),
+        ("Icon size", number_or_unavailable(view.icon_size)),
+        ("Group by", text_or_unavailable(view.group_by.as_deref())),
         (
-            "GroupAscending",
+            "Group ascending",
             number_or_unavailable(view.group_ascending),
         ),
         (
-            "SortByList",
+            "Sort by list",
             text_or_unavailable(view.sort_by_list.as_deref()),
         ),
         (
-            "ColumnList",
+            "Column list",
             text_or_unavailable(view.column_list.as_deref()),
         ),
         (
@@ -604,19 +876,19 @@ mod tests {
 
         let rows = view_rows(&view);
 
-        assert_eq!(rows[0].0, "LogicalViewMode");
+        assert_eq!(rows[0].0, "Logical view mode (LogicalViewMode)");
         assert_eq!(rows[0].1, "0");
         assert_eq!(rows[1].0, "Mode");
         assert_eq!(rows[1].1, "4");
-        assert_eq!(rows[2].0, "IconSize");
+        assert_eq!(rows[2].0, "Icon size");
         assert_eq!(rows[2].1, "16");
-        assert_eq!(rows[3].0, "GroupBy");
+        assert_eq!(rows[3].0, "Group by");
         assert_eq!(rows[3].1, "(empty string)");
-        assert_eq!(rows[4].0, "GroupAscending");
+        assert_eq!(rows[4].0, "Group ascending");
         assert_eq!(rows[4].1, "0");
-        assert_eq!(rows[5].0, "SortByList");
+        assert_eq!(rows[5].0, "Sort by list");
         assert_eq!(rows[5].1, "Name");
-        assert_eq!(rows[6].0, "ColumnList");
+        assert_eq!(rows[6].0, "Column list");
         assert_eq!(rows[6].1, "Unavailable");
         assert_eq!(rows[7].0, "ColInfo");
         assert_eq!(rows[7].1, "3 bytes");
@@ -1004,5 +1276,112 @@ mod tests {
 
         assert_eq!(before, after);
         assert_eq!(before_json, after_json);
+    }
+
+    #[test]
+    fn folder_search_filters_by_guid_and_name() {
+        let mut snapshot = snapshot_with_folder_types();
+        let index = FolderTypesIndex::from_snapshot(&snapshot);
+
+        let mut browser = FolderBrowser::default();
+
+        // Search by GUID substring
+        browser.update_search("GUID-A".to_string(), &index, &snapshot);
+        assert!(browser.filtered_guids.is_some());
+        let filtered = browser.filtered_guids.as_ref().unwrap();
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0], "GUID-A");
+
+        // Search by canonical name substring
+        browser.update_search("Documents".to_string(), &index, &snapshot);
+        assert!(browser.filtered_guids.is_some());
+        let filtered = browser.filtered_guids.as_ref().unwrap();
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0], "GUID-A");
+
+        // Case insensitive
+        browser.update_search("documents".to_string(), &index, &snapshot);
+        let filtered = browser.filtered_guids.as_ref().unwrap();
+        assert_eq!(filtered.len(), 1);
+
+        // Empty query clears filter
+        browser.update_search("".to_string(), &index, &snapshot);
+        assert!(browser.filtered_guids.is_none());
+
+        // Whitespace only clears filter
+        browser.update_search("   ".to_string(), &index, &snapshot);
+        assert!(browser.filtered_guids.is_none());
+    }
+
+    #[test]
+    fn folder_search_resets_selection_and_pagination() {
+        let mut snapshot = snapshot_with_folder_types();
+        let index = FolderTypesIndex::from_snapshot(&snapshot);
+
+        let mut browser = FolderBrowser::default();
+        browser.select_root(RootKey::Hklm);
+        browser.select_folder("GUID-A");
+        browser.page = 1;
+        browser.selected_value = Some("Mode".into());
+
+        browser.update_search("GUID-A".to_string(), &index, &snapshot);
+
+        assert_eq!(browser.page, 0);
+        assert!(browser.selected_guid.is_none());
+        assert_eq!(browser.view_index, 0);
+        assert_eq!(browser.selected_value, None);
+    }
+
+    #[test]
+    fn folder_search_preserves_duplicate_guids_across_hives() {
+        // GUID-A exists in both HKCU and HKLM with different canonical names
+        let mut snapshot = snapshot_with_folder_types();
+        let index = FolderTypesIndex::from_snapshot(&snapshot);
+
+        let mut browser = FolderBrowser::default();
+        browser.select_root(RootKey::Hklm);
+        browser.update_search("GUID-A".to_string(), &index, &snapshot);
+        let filtered = browser.filtered_guids.as_ref().unwrap();
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0], "GUID-A");
+
+        browser.select_root(RootKey::Hkcu);
+        browser.update_search("GUID-A".to_string(), &index, &snapshot);
+        let filtered = browser.filtered_guids.as_ref().unwrap();
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0], "GUID-A");
+    }
+
+    #[test]
+    fn folder_search_pagination_works() {
+        let mut snapshot = snapshot_with_folder_types();
+
+        // Add 30 more entries
+        for i in 3..33 {
+            let guid = format!("GUID-{}", i);
+            let folder = FolderTypeSnapshot {
+                guid: guid.clone(),
+                canonical_name: Some(format!("Folder {}", i)),
+                top_views: BTreeMap::new(),
+                read_errors: vec![],
+            };
+            snapshot.hklm_folder_types.types.insert(guid, folder);
+        }
+
+        let index = FolderTypesIndex::from_snapshot(&snapshot);
+        let mut browser = FolderBrowser::default();
+        browser.select_root(RootKey::Hklm);
+
+        // Search matching all
+        browser.update_search("GUID".to_string(), &index, &snapshot);
+        assert!(browser.filtered_guids.is_some());
+        let filtered: Vec<String> = browser.filtered_guids.as_ref().unwrap().clone();
+        assert_eq!(filtered.len(), 32); // 2 original + 30 new
+
+        assert_eq!(FolderBrowser::page_count(32), 2);
+        assert_eq!(browser.page_range(filtered.len()), 0..25);
+
+        browser.select_page(1, filtered.len());
+        assert_eq!(browser.page_range(filtered.len()), 25..32);
     }
 }

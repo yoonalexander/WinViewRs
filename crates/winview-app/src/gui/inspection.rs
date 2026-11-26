@@ -10,11 +10,22 @@ use winview_core::model::InspectionSnapshot;
 use super::folder_types::FolderTypesIndex;
 use super::overview::InspectionOverview;
 
-pub(super) struct CapturedInspection {
-    pub(super) snapshot: Arc<InspectionSnapshot>,
-    pub(super) error_count: usize,
-    pub(super) overview: InspectionOverview,
-    pub(super) folder_index: FolderTypesIndex,
+pub struct CapturedInspection {
+    pub snapshot: Arc<InspectionSnapshot>,
+    pub error_count: usize,
+    pub overview: InspectionOverview,
+    pub folder_index: FolderTypesIndex,
+}
+
+impl Clone for CapturedInspection {
+    fn clone(&self) -> Self {
+        Self {
+            snapshot: Arc::clone(&self.snapshot),
+            error_count: self.error_count,
+            overview: self.overview.clone(),
+            folder_index: self.folder_index.clone(),
+        }
+    }
 }
 
 #[derive(Default)]
@@ -29,7 +40,24 @@ pub(super) enum InspectionState {
     Error(String),
 }
 
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub(super) enum InspectionStateKind {
+    Idle,
+    Loading,
+    Finished,
+    Error,
+}
+
 impl InspectionState {
+    pub(super) fn kind(&self) -> InspectionStateKind {
+        match self {
+            Self::Idle => InspectionStateKind::Idle,
+            Self::Loading(_) => InspectionStateKind::Loading,
+            Self::Finished(_) => InspectionStateKind::Finished,
+            Self::Error(_) => InspectionStateKind::Error,
+        }
+    }
+
     pub(super) fn is_loading(&self) -> bool {
         matches!(self, Self::Loading(_))
     }

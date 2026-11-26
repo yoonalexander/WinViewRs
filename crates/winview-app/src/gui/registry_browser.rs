@@ -1,3 +1,5 @@
+// winview-app/src/gui/registry_browser.rs
+
 use std::collections::BTreeMap;
 use std::ops::Bound::{Excluded, Unbounded};
 
@@ -8,6 +10,8 @@ use winview_core::model::{
 };
 
 use super::diagnostics::ErrorPager;
+use super::style::helpers;
+use super::style::{StatusKind, ThemeColors, WIDE_WINDOW_THRESHOLD};
 
 const PAGE_SIZE: usize = 25;
 const TEXT_PREVIEW_CHARS: usize = 160;
@@ -38,6 +42,10 @@ impl RegistryDomain {
             Self::Clsid => "CLSID",
             Self::Policies => "Policies",
         }
+    }
+
+    fn all() -> [Self; 4] {
+        [Self::Bags, Self::Streams, Self::Clsid, Self::Policies]
     }
 }
 
@@ -178,12 +186,14 @@ pub(super) struct RegistryBrowser {
     value_page: PageCursor,
     selected_value: Option<String>,
     error_pager: ErrorPager,
+    child_key_pager: ErrorPager,
 }
 
 impl RegistryBrowser {
     fn reset_pages(&mut self) {
         self.key_page.reset();
         self.value_page.reset();
+        self.child_key_pager.reset();
         self.selected_value = None;
         self.error_pager.reset();
     }
@@ -212,20 +222,22 @@ impl RegistryBrowser {
     }
 
     pub(super) fn show(&mut self, ui: &mut egui::Ui, snapshot: &InspectionSnapshot) {
-        ui.heading("Registry domains");
+        let colors = ThemeColors::from_style(&ui.style());
+        let available_width = ui.available_width();
+        let is_wide = available_width >= WIDE_WINDOW_THRESHOLD;
 
+        helpers::section_heading(ui, "Registry browser");
+
+        // Domain selector
         ui.horizontal(|ui| {
-            for d in [
-                RegistryDomain::Bags,
-                RegistryDomain::Streams,
-                RegistryDomain::Clsid,
-                RegistryDomain::Policies,
-            ] {
-                if ui.selectable_label(self.domain == d, d.label()).clicked() {
+            for d in RegistryDomain::all() {
+                if helpers::nav_item_small(ui, self.domain == d, d.label()).clicked() {
                     self.select_domain(d);
                 }
             }
         });
+
+        ui.add_space(8.0);
 
         let roots = self.domain.roots(snapshot);
 
@@ -236,6 +248,7 @@ impl RegistryBrowser {
             self.go_to_roots();
         }
 
+        // Navigation buttons
         ui.horizontal(|ui| {
             if ui.button("Roots").clicked() {
                 self.go_to_roots();
@@ -248,13 +261,9 @@ impl RegistryBrowser {
             }
         });
 
-        let current_key = if self.path.is_empty() {
-            None
-        } else {
-            resolve_key(roots, &self.path)
-        };
+        ui.add_space(8.0);
 
-        // hive identity
+        // Current location display
         let hive = self.path.first().map(|key| root_identity(key).0).unwrap_or(
             if self.domain == RegistryDomain::Policies {
                 "HKLM/HKCU"
@@ -276,10 +285,37 @@ impl RegistryBrowser {
                 preview_text(path)
             })
             .unwrap_or_else(|| "<roots>".into());
-        ui.label(format!("Current hive: {}", hive));
-        ui.label(format!("Registry path: {}", path_display));
 
-        let (child_map, value_map) = if let Some(key) = current_key {
+        ui.horizontal(|ui| {
+            ui.label(
+                egui::RichText::new("Current hive:")
+                    .size(12.0)
+                    .color(colors.text_secondary),
+            );
+            ui.label(
+                egui::RichText::new(hive)
+                    .size(13.0)
+                    .strong()
+                    .color(colors.text),
+            );
+
+            ui.add_space(16.0);
+
+            ui.label(
+                egui::RichText::new("Registry path:")
+                    .size(12.0)
+                    .color(colors.text_secondary),
+            );
+            ui.label(
+                egui::RichText::new(path_display)
+                    .size(13.0)
+                    .color(colors.text),
+            );
+        });
+
+        ui.add_space(8.0);
+
+        let (child_map, value_map) = if let Some(key) = selected {
             (&key.subkeys, &key.values)
         } else {
             (roots, &BTreeMap::new())
@@ -287,21 +323,52 @@ impl RegistryBrowser {
 
         let at_roots = self.path.is_empty();
 
-        if at_roots {
-            ui.label(format!("Immediate child records: {}", roots.len()));
-            ui.label("Value records: 0");
-            ui.label("Direct key errors: No key selected");
-        } else if let Some(key) = current_key {
-            ui.label(format!("Immediate child records: {}", key.subkeys.len()));
-            ui.label(format!("Value records: {}", key.values.len()));
-            ui.label(format!("Direct key errors: {}", key.read_errors.len()));
-        }
+        // Summary counts
+        ui.horizontal_wrapped(|ui| {
+            if at_roots {
+                helpers::status_badge(
+                    ui,
+                    &format!("Immediate child records: {}", roots.len()),
+                    StatusKind::Info,
+                );
+                helpers::status_badge(ui, "Value records: 0", StatusKind::Neutral);
+                helpers::status_badge(
+                    ui,
+                    "Direct key errors: N/A (no key selected)",
+                    StatusKind::Neutral,
+                );
+            } else if let Some(key) = selected {
+                helpers::status_badge(
+                    ui,
+                    &format!("Immediate child records: {}", key.subkeys.len()),
+                    StatusKind::Info,
+                );
+                helpers::status_badge(
+                    ui,
+                    &format!("Value records: {}", key.values.len()),
+                    StatusKind::Info,
+                );
+                let error_kind = if key.read_errors.is_empty() {
+                    StatusKind::Success
+                } else {
+                    StatusKind::Warning
+                };
+                helpers::status_badge(
+                    ui,
+                    &format!("Direct key errors: {}", key.read_errors.len()),
+                    error_kind,
+                );
+            }
+        });
 
-        // Pagination for child keys
+        ui.add_space(8.0);
+
+        // Child keys
         let child_source: &BTreeMap<String, KeySnapshot> = if at_roots { roots } else { child_map };
 
         let (child_entries, child_has_next) =
             page_entries(child_source, self.key_page.after.as_deref());
+
         ui.push_id("registry_key_pagination", |ui| {
             ui.horizontal(|ui| {
                 let on_first = self.key_page.after.is_none() && self.key_page.history.is_empty();
@@ -321,75 +388,176 @@ impl RegistryBrowser {
                     }
                     ui.ctx().request_repaint();
                 }
-                ui.label(format!("Page {}", self.key_page.page_number()));
+                ui.add_space(16.0);
+                ui.label(
+                    egui::RichText::new(format!("Page {}", self.key_page.page_number()))
+                        .size(12.0)
+                        .color(colors.text_secondary),
+                );
             });
         });
+
+        ui.add_space(8.0);
 
         let (child_entries, _) = page_entries(child_source, self.key_page.after.as_deref());
 
         if child_entries.is_empty() {
-            ui.label("No child key records were captured.");
+            ui.label(
+                egui::RichText::new("No child key records were captured.")
+                    .size(13.0)
+                    .color(colors.text_secondary),
+            );
         } else {
-            let mut navigated = false;
-            for (key_str, snap) in &child_entries {
-                let preview = if at_roots {
-                    let (hive, path) = root_identity(key_str);
+            if is_wide {
+                // Master-detail: child keys on left
+                egui::Panel::left("registry_keys_panel")
+                    .exact_size(320.0)
+                    .resizable(false)
+                    .show_separator_line(true)
+                    .frame(egui::Frame::new().fill(egui::Color32::TRANSPARENT))
+                    .show(ui, |ui| {
+                        self.show_child_keys(ui, &child_entries, at_roots);
+                    });
 
-                    format!("{hive}\\{}", preview_text(path))
+                egui::CentralPanel::default()
+                    .frame(egui::Frame::new().fill(egui::Color32::TRANSPARENT))
+                    .show(ui, |ui| {
+                        self.show_values_and_details(ui, value_map, at_roots);
+                    });
+            } else {
+                // Stacked
+                egui::ScrollArea::vertical()
+                    .id_salt("registry_keys_scroll")
+                    .max_height(300.0)
+                    .show(ui, |ui| {
+                        self.show_child_keys(ui, &child_entries, at_roots);
+                    });
+
+                ui.add_space(16.0);
+                ui.separator();
+                ui.add_space(8.0);
+
+                self.show_values_and_details(ui, value_map, at_roots);
+            }
+        }
+
+        if let Some(key) = selected {
+            ui.add_space(8.0);
+            ui.separator();
+            ui.add_space(8.0);
+
+            self.error_pager
+                .show(ui, "Selected key inspection errors", &key.read_errors);
+        } else {
+            ui.small(
+                egui::RichText::new(
+                    "Select a captured registry key to inspect its recorded errors.",
+                )
+                .size(12.0)
+                .color(colors.text_secondary),
+            );
+        }
+    }
+
+    fn show_child_keys(
+        &mut self,
+        ui: &mut egui::Ui,
+        entries: &[(&String, &KeySnapshot)],
+        at_roots: bool,
+    ) {
+        let colors = ThemeColors::from_style(&ui.style());
+
+        for (key_str, snap) in entries {
+            let preview = if at_roots {
+                let (hive, path) = root_identity(key_str);
+                format!("{hive}\\{}", preview_text(path))
+            } else {
+                preview_text(last_component(key_str))
+            };
+
+            ui.push_id(key_str.as_str(), |ui| {
+                let response = ui.allocate_response(
+                    egui::vec2(ui.available_width(), 40.0),
+                    egui::Sense::click(),
+                );
+
+                let selected = false; // No single selection for keys, click navigates
+                let bg = if response.hovered() {
+                    colors.accent.gamma_multiply(0.06)
                 } else {
-                    preview_text(last_component(key_str))
+                    egui::Color32::TRANSPARENT
                 };
-                ui.push_id(key_str.as_str(), |ui| {
-                    if ui
-                        .button(format!(
-                            "{}  (values: {}, subkeys: {}, errors: {})",
-                            preview,
-                            snap.values.len(),
-                            snap.subkeys.len(),
-                            snap.read_errors.len()
-                        ))
-                        .clicked()
-                    {
-                        navigated = true;
-                    }
-                });
-                if navigated {
+
+                if bg != egui::Color32::TRANSPARENT {
+                    ui.painter().rect_filled(response.rect, 4.0, bg);
+                }
+
+                let text_pos = response.rect.left_top() + egui::vec2(12.0, 8.0);
+                ui.painter().text(
+                    text_pos,
+                    egui::Align2::LEFT_TOP,
+                    &preview,
+                    egui::FontId::new(13.0, egui::FontFamily::Proportional),
+                    colors.text,
+                );
+
+                let meta_pos = response.rect.left_top() + egui::vec2(12.0, 24.0);
+                ui.painter().text(
+                    meta_pos,
+                    egui::Align2::LEFT_TOP,
+                    &format!(
+                        "Values: {} | Subkeys: {} | Errors: {}",
+                        snap.values.len(),
+                        snap.subkeys.len(),
+                        snap.read_errors.len()
+                    ),
+                    egui::FontId::new(11.0, egui::FontFamily::Proportional),
+                    colors.text_secondary,
+                );
+
+                if response.clicked() {
                     self.enter_key(key_str);
                     ui.ctx().request_repaint();
-                    return;
                 }
-            }
+            });
+
+            ui.add_space(4.0);
         }
+    }
+
+    fn show_values_and_details(
+        &mut self,
+        ui: &mut egui::Ui,
+        value_map: &BTreeMap<String, ValueReadResult>,
+        at_roots: bool,
+    ) {
+        let colors = ThemeColors::from_style(&ui.style());
+
+        ui.horizontal(|ui| {
+            ui.heading("Values");
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if !at_roots && value_map.is_empty() {
+                    ui.label(
+                        egui::RichText::new("No value records were captured for this key.")
+                            .size(12.0)
+                            .color(colors.text_secondary),
+                    );
+                } else if at_roots {
+                    ui.label(
+                        egui::RichText::new("No value records at domain roots.")
+                            .size(12.0)
+                            .color(colors.text_secondary),
+                    );
+                }
+            });
+        });
 
         // Values pagination
-        let value_source: &BTreeMap<String, ValueReadResult> = if at_roots {
-            // no values at roots
-            &BTreeMap::new()
-        } else {
-            value_map
-        };
-
-        // Need a stable empty map reference; create static? Use a local empty
-        // We'll handle empty case
-        ui.separator();
-        ui.heading("Values");
-        let (val_entries, val_has_next) = if value_source.is_empty() && !at_roots {
-            // empty map
+        let (val_entries, val_has_next) = if value_map.is_empty() && !at_roots {
             (Vec::new(), false)
         } else {
-            page_entries(value_source, self.value_page.after.as_deref())
+            page_entries(value_map, self.value_page.after.as_deref())
         };
-
-        // empty map message
-        if !at_roots {
-            if let Some(key) = current_key {
-                if key.values.is_empty() {
-                    ui.label("No value records were captured for this key.");
-                }
-            }
-        } else {
-            ui.label("No value records at domain roots.");
-        }
 
         ui.push_id("registry_value_pagination", |ui| {
             ui.horizontal(|ui| {
@@ -413,38 +581,129 @@ impl RegistryBrowser {
                     self.selected_value = None;
                     ui.ctx().request_repaint();
                 }
-                ui.label(format!("Page {}", self.value_page.page_number()));
+                ui.add_space(16.0);
+                ui.label(
+                    egui::RichText::new(format!("Page {}", self.value_page.page_number()))
+                        .size(12.0)
+                        .color(colors.text_secondary),
+                );
             });
         });
 
-        let (val_entries, _) = page_entries(value_source, self.value_page.after.as_deref());
+        ui.add_space(8.0);
+
+        let (val_entries, _) = page_entries(value_map, self.value_page.after.as_deref());
 
         if !val_entries.is_empty() {
-            egui::Grid::new("registry_values")
-                .num_columns(4)
-                .striped(true)
-                .show(ui, |ui| {
-                    ui.label("Value name");
-                    ui.label("Registry type ID");
-                    ui.label("Payload size");
-                    ui.label("Status");
-                    ui.end_row();
-                    for (name, obs) in &val_entries {
-                        let meta = value_metadata(name, obs);
-                        let selected = self.selected_value.as_deref() == Some(name.as_str());
-                        if ui.selectable_label(selected, meta.name).clicked() {
-                            self.selected_value = Some(name.to_string());
-                        }
-                        ui.label(meta.type_id);
-                        ui.label(meta.payload_size);
-                        ui.label(meta.status);
+            if ui.available_width() >= WIDE_WINDOW_THRESHOLD {
+                // Wide: table layout
+                egui::Grid::new("registry_values")
+                    .num_columns(4)
+                    .striped(true)
+                    .min_col_width(120.0)
+                    .show(ui, |ui| {
+                        ui.strong("Value name");
+                        ui.strong("Registry type ID");
+                        ui.strong("Payload size");
+                        ui.strong("Status");
                         ui.end_row();
-                    }
-                });
+                        for (name, obs) in &val_entries {
+                            let meta = value_metadata(name, obs);
+                            let selected = self.selected_value.as_deref() == Some(name.as_str());
+                            if ui
+                                .selectable_label(
+                                    selected,
+                                    egui::RichText::new(&meta.name).size(13.0),
+                                )
+                                .clicked()
+                            {
+                                self.selected_value = Some(name.to_string());
+                            }
+                            ui.label(
+                                egui::RichText::new(&meta.type_id)
+                                    .size(13.0)
+                                    .color(colors.text),
+                            );
+                            ui.label(
+                                egui::RichText::new(&meta.payload_size)
+                                    .size(13.0)
+                                    .color(colors.text),
+                            );
+                            let status_color = match meta.status {
+                                "Decoded" => colors.success,
+                                _ => colors.warning,
+                            };
+                            ui.label(
+                                egui::RichText::new(meta.status)
+                                    .size(13.0)
+                                    .color(status_color),
+                            );
+                            ui.end_row();
+                        }
+                    });
+            } else {
+                // Narrow: stacked cards
+                for (name, obs) in &val_entries {
+                    let meta = value_metadata(name, obs);
+                    let selected = self.selected_value.as_deref() == Some(name.as_str());
+
+                    egui::Frame::new()
+                        .fill(colors.panel_background)
+                        .stroke(egui::Stroke::new(1.0, colors.border))
+                        .corner_radius(egui::CornerRadius::same(4))
+                        .inner_margin(egui::Margin::symmetric(12, 8))
+                        .show(ui, |ui| {
+                            ui.horizontal(|ui| {
+                                if ui
+                                    .selectable_label(
+                                        selected,
+                                        egui::RichText::new(&meta.name).size(13.0).strong(),
+                                    )
+                                    .clicked()
+                                {
+                                    self.selected_value = Some(name.to_string());
+                                }
+
+                                ui.with_layout(
+                                    egui::Layout::right_to_left(egui::Align::Center),
+                                    |ui| {
+                                        let status_color = match meta.status {
+                                            "Decoded" => colors.success,
+                                            _ => colors.warning,
+                                        };
+                                        ui.label(
+                                            egui::RichText::new(meta.status)
+                                                .size(12.0)
+                                                .color(status_color)
+                                                .strong(),
+                                        );
+                                    },
+                                );
+                            });
+
+                            ui.add_space(4.0);
+                            ui.horizontal(|ui| {
+                                ui.label(
+                                    egui::RichText::new(&format!("Type ID: {}", meta.type_id))
+                                        .size(11.0)
+                                        .color(colors.text_secondary),
+                                );
+                                ui.add_space(16.0);
+                                ui.label(
+                                    egui::RichText::new(&format!("Size: {}", meta.payload_size))
+                                        .size(11.0)
+                                        .color(colors.text_secondary),
+                                );
+                            });
+                        });
+
+                    ui.add_space(4.0);
+                }
+            }
         }
 
         if let Some(selected) = self.selected_value.clone() {
-            match value_source.get(&selected) {
+            match value_map.get(&selected) {
                 Some(observation) => {
                     super::value_details::show_value_details(ui, &selected, observation);
                 }
@@ -452,18 +711,6 @@ impl RegistryBrowser {
                     self.selected_value = None;
                 }
             }
-        }
-
-        if let Some(key) = current_key {
-            ui.separator();
-
-            self.error_pager.show(
-                ui,
-                "Selected key inspection error details",
-                &key.read_errors,
-            );
-        } else {
-            ui.small("Select a captured registry key to inspect its recorded errors.");
         }
     }
 }

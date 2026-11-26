@@ -9,6 +9,9 @@ use winview_core::model::{
 };
 use winview_core::RootKey;
 
+use super::style::helpers;
+use super::style::{ThemeColors, WIDE_WINDOW_THRESHOLD};
+
 const MAX_HEX_BYTES: usize = 64;
 const MAX_TEXT_CHARS: usize = 160;
 const MAX_MULTI_STRING_ITEMS: usize = 8;
@@ -94,10 +97,17 @@ fn decoded_preview(value: &RegistryValue) -> String {
     }
 }
 
+#[derive(Debug, Clone)]
+pub(super) struct DetailSection {
+    pub title: &'static str,
+    pub rows: Vec<DetailRow>,
+}
+
+#[derive(Debug, Clone)]
 pub(super) struct DetailRow {
-    label: &'static str,
-    value: String,
-    monospace: bool,
+    pub label: &'static str,
+    pub value: String,
+    pub monospace: bool,
 }
 
 impl DetailRow {
@@ -147,97 +157,204 @@ fn read_error_label(error: &ReadError) -> (&'static str, &str) {
     }
 }
 
-fn detail_rows(name: &str, observation: &ValueReadResult) -> Vec<DetailRow> {
+fn build_detail_sections(name: &str, observation: &ValueReadResult) -> Vec<DetailSection> {
     let display_name = if name.is_empty() {
         "(Default)".to_string()
     } else {
         text_preview(name)
     };
 
-    let mut rows = vec![DetailRow::new("Value name", display_name)];
+    let mut sections = Vec::new();
+
+    // Registry identity
+    let mut identity_rows = vec![DetailRow::new("Value name", display_name)];
 
     match observation {
         ValueReadResult::Success(raw) => {
-            rows.push(DetailRow::new("Registry hive", hive_label(raw.root)));
-            rows.push(DetailRow::new(
+            identity_rows.push(DetailRow::new("Registry hive", hive_label(raw.root)));
+            identity_rows.push(DetailRow::new(
                 "Captured key path",
                 text_preview(&raw.key_path),
             ));
-            rows.push(DetailRow::new(
+            identity_rows.push(DetailRow::new(
                 "Observation source",
                 source_label(raw.source),
             ));
-            rows.push(DetailRow::new(
+        }
+        ValueReadResult::Failure(_) => {
+            identity_rows.push(DetailRow::new("Registry hive", UNAVAILABLE));
+            identity_rows.push(DetailRow::new("Captured key path", UNAVAILABLE));
+            identity_rows.push(DetailRow::new("Observation source", UNAVAILABLE));
+        }
+    }
+
+    sections.push(DetailSection {
+        title: "Registry identity",
+        rows: identity_rows,
+    });
+
+    // Read and decoding status
+    let mut status_rows = Vec::new();
+
+    match observation {
+        ValueReadResult::Success(raw) => {
+            status_rows.push(DetailRow::new(
                 "Registry type ID",
                 raw.raw_type_id.to_string(),
             ));
-            rows.push(DetailRow::new(
+            status_rows.push(DetailRow::new(
                 "Raw payload size",
                 format!("{} bytes", raw.raw_bytes.len()),
             ));
 
             match &raw.decoding_status {
                 DecodingStatus::Decoded => {
-                    rows.push(DetailRow::new("Decoding status", "Decoded"));
+                    status_rows.push(DetailRow::new("Decoding status", "Decoded"));
                 }
                 DecodingStatus::Malformed { reason } => {
-                    rows.push(DetailRow::new("Decoding status", "Malformed data"));
-                    rows.push(DetailRow::new("Malformed reason", text_preview(reason)));
+                    status_rows.push(DetailRow::new("Decoding status", "Malformed data"));
+                    status_rows.push(DetailRow::new("Malformed reason", text_preview(reason)));
                 }
                 DecodingStatus::UnknownType => {
-                    rows.push(DetailRow::new("Decoding status", "Unknown registry type"));
+                    status_rows.push(DetailRow::new("Decoding status", "Unknown registry type"));
                 }
             }
-
-            rows.push(DetailRow::monospace(
-                "Raw payload preview (hex)",
-                hex_preview(&raw.raw_bytes),
-            ));
-
-            let decoded = match (&raw.decoding_status, &raw.decoded) {
-                (DecodingStatus::Decoded, Some(value)) => decoded_preview(value),
-                _ => UNAVAILABLE.to_string(),
-            };
-
-            rows.push(DetailRow::new("Decoded representation", decoded));
         }
-
         ValueReadResult::Failure(error) => {
             let (status, detail) = read_error_label(error);
-
-            rows.push(DetailRow::new("Read status", status));
-            rows.push(DetailRow::new("Error details", text_preview(detail)));
-            rows.push(DetailRow::new("Registry type ID", UNAVAILABLE));
-            rows.push(DetailRow::new("Raw payload size", UNAVAILABLE));
-            rows.push(DetailRow::new("Decoded representation", UNAVAILABLE));
+            status_rows.push(DetailRow::new("Read status", status));
+            status_rows.push(DetailRow::new("Error details", text_preview(detail)));
+            status_rows.push(DetailRow::new("Registry type ID", UNAVAILABLE));
+            status_rows.push(DetailRow::new("Raw payload size", UNAVAILABLE));
         }
     }
 
-    rows
+    sections.push(DetailSection {
+        title: "Read and decoding status",
+        rows: status_rows,
+    });
+
+    // Raw payload preview
+    let mut payload_rows = Vec::new();
+
+    match observation {
+        ValueReadResult::Success(raw) => {
+            payload_rows.push(DetailRow::monospace(
+                "Raw payload preview (hex)",
+                hex_preview(&raw.raw_bytes),
+            ));
+        }
+        ValueReadResult::Failure(_) => {
+            payload_rows.push(DetailRow::new("Raw payload preview (hex)", UNAVAILABLE));
+        }
+    }
+
+    sections.push(DetailSection {
+        title: "Raw payload preview",
+        rows: payload_rows,
+    });
+
+    // Decoded representation
+    let mut decoded_rows = Vec::new();
+
+    let decoded = match observation {
+        ValueReadResult::Success(raw) => match (&raw.decoding_status, &raw.decoded) {
+            (DecodingStatus::Decoded, Some(value)) => decoded_preview(value),
+            _ => UNAVAILABLE.to_string(),
+        },
+        ValueReadResult::Failure(_) => UNAVAILABLE.to_string(),
+    };
+
+    decoded_rows.push(DetailRow::new("Decoded representation", decoded));
+
+    sections.push(DetailSection {
+        title: "Decoded representation",
+        rows: decoded_rows,
+    });
+
+    sections
 }
 
 pub(super) fn show_value_details(ui: &mut egui::Ui, name: &str, observation: &ValueReadResult) {
+    let colors = ThemeColors::from_style(&ui.style());
+    let available_width = ui.available_width();
+    let is_wide = available_width >= WIDE_WINDOW_THRESHOLD;
+
+    ui.add_space(8.0);
     ui.separator();
-    ui.heading("Value details");
+    ui.add_space(8.0);
 
-    egui::Grid::new("value_details_grid")
-        .num_columns(2)
-        .striped(true)
-        .show(ui, |ui| {
-            for row in detail_rows(name, observation) {
-                ui.label(row.label);
+    helpers::section_heading(ui, "Value details");
 
-                if row.monospace {
-                    ui.monospace(row.value);
-                } else {
-                    ui.label(row.value);
-                }
+    let sections = build_detail_sections(name, observation);
 
-                ui.end_row();
+    for section in sections {
+        if is_wide {
+            // Two-column layout
+            egui::Grid::new(section.title)
+                .num_columns(2)
+                .striped(true)
+                .min_col_width(180.0)
+                .show(ui, |ui| {
+                    for row in section.rows {
+                        ui.label(
+                            egui::RichText::new(row.label)
+                                .size(13.0)
+                                .color(colors.text_secondary),
+                        );
+
+                        if row.monospace {
+                            ui.monospace(
+                                egui::RichText::new(&row.value)
+                                    .size(13.0)
+                                    .color(colors.text),
+                            );
+                        } else {
+                            ui.label(
+                                egui::RichText::new(&row.value)
+                                    .size(13.0)
+                                    .color(colors.text),
+                            );
+                        }
+                        ui.end_row();
+                    }
+                });
+        } else {
+            // Stacked layout
+            for row in section.rows {
+                ui.horizontal(|ui| {
+                    ui.set_min_width(160.0);
+                    ui.label(
+                        egui::RichText::new(row.label)
+                            .size(13.0)
+                            .color(colors.text_secondary),
+                    );
+                    ui.add_space(12.0);
+
+                    if row.monospace {
+                        ui.monospace(
+                            egui::RichText::new(&row.value)
+                                .size(13.0)
+                                .color(colors.text),
+                        );
+                    } else {
+                        ui.label(
+                            egui::RichText::new(&row.value)
+                                .size(13.0)
+                                .color(colors.text),
+                        );
+                    }
+                });
             }
-        });
+        }
 
-    ui.small("Previews are bounded and are not a complete raw payload dump.");
+        ui.add_space(12.0);
+    }
+
+    ui.small(
+        egui::RichText::new("Previews are bounded and are not a complete raw payload dump.")
+            .color(colors.text_secondary),
+    );
 }
 
 #[cfg(test)]
@@ -368,21 +485,29 @@ mod tests {
             Some(RegistryValue::Dword(1)),
             DecodingStatus::Decoded,
         );
-        let decoded_rows = detail_rows("Mode", &decoded);
-        assert_eq!(row_value(&decoded_rows, "Decoding status"), "Decoded");
-        assert_eq!(row_value(&decoded_rows, "Decoded representation"), "1");
-        assert_eq!(row_value(&decoded_rows, "Registry type ID"), "4");
-        assert!(row_value(&decoded_rows, "Raw payload preview (hex)").contains("01 00 00 00"));
+        let sections = build_detail_sections("Mode", &decoded);
+        let identity_rows = &sections[0].rows;
+        let status_rows = &sections[1].rows;
+        let payload_rows = &sections[2].rows;
+        let decoded_rows = &sections[3].rows;
+
+        assert_eq!(row_value(identity_rows, "Value name"), "Mode");
+        assert_eq!(row_value(status_rows, "Decoding status"), "Decoded");
+        assert_eq!(row_value(decoded_rows, "Decoded representation"), "1");
+        assert_eq!(row_value(status_rows, "Registry type ID"), "4");
+        assert!(row_value(payload_rows, "Raw payload preview (hex)").contains("01 00 00 00"));
 
         let unknown = success(99, vec![1, 2, 3], None, DecodingStatus::UnknownType);
-        let unknown_rows = detail_rows("Unknown", &unknown);
+        let sections = build_detail_sections("Unknown", &unknown);
+        let status_rows = &sections[1].rows;
+        let decoded_rows = &sections[3].rows;
         assert_eq!(
-            row_value(&unknown_rows, "Decoding status"),
+            row_value(status_rows, "Decoding status"),
             "Unknown registry type"
         );
-        assert_eq!(row_value(&unknown_rows, "Registry type ID"), "99");
+        assert_eq!(row_value(status_rows, "Registry type ID"), "99");
         assert_eq!(
-            row_value(&unknown_rows, "Decoded representation"),
+            row_value(decoded_rows, "Decoded representation"),
             UNAVAILABLE
         );
 
@@ -394,31 +519,34 @@ mod tests {
                 reason: "Invalid DWORD length".into(),
             },
         );
-        let malformed_rows = detail_rows("Malformed", &malformed);
+        let sections = build_detail_sections("Malformed", &malformed);
+        let status_rows = &sections[1].rows;
+        let decoded_rows = &sections[3].rows;
+        assert_eq!(row_value(status_rows, "Decoding status"), "Malformed data");
         assert_eq!(
-            row_value(&malformed_rows, "Decoding status"),
-            "Malformed data"
-        );
-        assert_eq!(
-            row_value(&malformed_rows, "Malformed reason"),
+            row_value(status_rows, "Malformed reason"),
             "Invalid DWORD length"
         );
-        assert_eq!(row_value(&malformed_rows, "Registry type ID"), "4");
+        assert_eq!(row_value(status_rows, "Registry type ID"), "4");
         assert_eq!(
-            row_value(&malformed_rows, "Decoded representation"),
+            row_value(decoded_rows, "Decoded representation"),
             UNAVAILABLE
         );
 
         let failed = ValueReadResult::Failure(ReadError::AccessDenied {
             path: r"Software\Test".into(),
         });
-        let failed_rows = detail_rows("Failed", &failed);
-        assert_eq!(row_value(&failed_rows, "Read status"), "Access denied");
-        assert_eq!(row_value(&failed_rows, "Error details"), r"Software\Test");
-        assert_eq!(row_value(&failed_rows, "Registry type ID"), UNAVAILABLE);
-        assert_eq!(row_value(&failed_rows, "Raw payload size"), UNAVAILABLE);
+        let sections = build_detail_sections("Failed", &failed);
+        let identity_rows = &sections[0].rows;
+        let status_rows = &sections[1].rows;
+        let decoded_rows = &sections[3].rows;
+        assert_eq!(row_value(identity_rows, "Value name"), "Failed");
+        assert_eq!(row_value(status_rows, "Read status"), "Access denied");
+        assert_eq!(row_value(status_rows, "Error details"), r"Software\Test");
+        assert_eq!(row_value(status_rows, "Registry type ID"), UNAVAILABLE);
+        assert_eq!(row_value(status_rows, "Raw payload size"), UNAVAILABLE);
         assert_eq!(
-            row_value(&failed_rows, "Decoded representation"),
+            row_value(decoded_rows, "Decoded representation"),
             UNAVAILABLE
         );
 
@@ -433,7 +561,7 @@ mod tests {
         let before = serde_json::to_string(&key).unwrap();
 
         for (name, observation) in &key.values {
-            let _ = detail_rows(name, observation);
+            let _ = build_detail_sections(name, observation);
         }
 
         let ctx = egui::Context::default();
@@ -451,5 +579,55 @@ mod tests {
 
         let snapshot = InspectionSnapshot::default();
         assert!(snapshot.bags.is_empty());
+    }
+
+    #[test]
+    fn build_detail_sections_organizes_content_correctly() {
+        let observation = success(
+            4,
+            1u32.to_le_bytes().to_vec(),
+            Some(RegistryValue::Dword(1)),
+            DecodingStatus::Decoded,
+        );
+
+        let sections = build_detail_sections("TestValue", &observation);
+
+        assert_eq!(sections.len(), 4);
+        assert_eq!(sections[0].title, "Registry identity");
+        assert_eq!(sections[1].title, "Read and decoding status");
+        assert_eq!(sections[2].title, "Raw payload preview");
+        assert_eq!(sections[3].title, "Decoded representation");
+
+        // Check identity section
+        let labels: Vec<&str> = sections[0].rows.iter().map(|r| r.label).collect();
+        assert!(labels.contains(&"Value name"));
+        assert!(labels.contains(&"Registry hive"));
+        assert!(labels.contains(&"Captured key path"));
+        assert!(labels.contains(&"Observation source"));
+
+        // Check status section
+        let labels: Vec<&str> = sections[1].rows.iter().map(|r| r.label).collect();
+        assert!(labels.contains(&"Registry type ID"));
+        assert!(labels.contains(&"Raw payload size"));
+        assert!(labels.contains(&"Decoding status"));
+    }
+
+    #[test]
+    fn build_detail_sections_handles_failure_observation() {
+        let observation = ValueReadResult::Failure(ReadError::ValueNotFound {
+            name: "Missing".into(),
+        });
+
+        let sections = build_detail_sections("Missing", &observation);
+
+        assert_eq!(sections.len(), 4);
+
+        let identity_rows = &sections[0].rows;
+        assert_eq!(row_value(identity_rows, "Value name"), "Missing");
+        assert_eq!(row_value(identity_rows, "Registry hive"), UNAVAILABLE);
+
+        let status_rows = &sections[1].rows;
+        assert_eq!(row_value(status_rows, "Read status"), "Value not found");
+        assert_eq!(row_value(status_rows, "Registry type ID"), UNAVAILABLE);
     }
 }

@@ -131,6 +131,14 @@ impl ExportBrowser {
         *self = Self::default();
     }
 
+    pub(super) fn destination_mut(&mut self) -> &mut String {
+        &mut self.destination
+    }
+
+    pub(super) fn result(&self) -> Option<&std::result::Result<std::path::PathBuf, String>> {
+        self.state.result()
+    }
+
     pub(super) fn start(&mut self, snapshot: Arc<InspectionSnapshot>) -> bool {
         let path = PathBuf::from(self.destination.trim());
 

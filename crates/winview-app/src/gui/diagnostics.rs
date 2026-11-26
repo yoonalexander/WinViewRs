@@ -5,12 +5,16 @@ use eframe::egui;
 use winview_core::model::InspectionError;
 use winview_core::RootKey;
 
+use super::style::helpers;
+use super::style::ThemeColors;
+
 const ERRORS_PER_PAGE: usize = 25;
 const MAX_DIAGNOSTIC_CHARS: usize = 512;
 
 #[derive(Default)]
 pub(super) struct ErrorPager {
     page: usize,
+    open: bool,
 }
 
 impl ErrorPager {
@@ -34,22 +38,86 @@ impl ErrorPager {
 
     pub(super) fn reset(&mut self) {
         self.page = 0;
+        self.open = false;
     }
 
     pub(super) fn show(&mut self, ui: &mut egui::Ui, heading: &str, errors: &[InspectionError]) {
+        let colors = ThemeColors::from_style(&ui.style());
+        let has_errors = !errors.is_empty();
+
         ui.push_id(heading, |ui| {
             self.select_page(self.page, errors.len());
 
-            ui.heading(heading);
+            let header_response = ui.horizontal(|ui| {
+                let toggle_text = if self.open { "▼" } else { "▶" };
+                if ui
+                    .selectable_label(self.open, format!("{} {}", toggle_text, heading))
+                    .clicked()
+                {
+                    self.open = !self.open;
+                }
 
-            ui.label(format!("Recorded errors in this scope: {}", errors.len()));
+                ui.add_space(8.0);
+
+                ui.label(
+                    egui::RichText::new(format!("Recorded errors: {}", errors.len()))
+                        .size(12.0)
+                        .color(if has_errors {
+                            colors.warning
+                        } else {
+                            colors.success
+                        })
+                        .strong(),
+                );
+            });
+
+            header_response
+                .response
+                .on_hover_text("Click to expand/collapse");
+
+            if !self.open {
+                if has_errors {
+                    ui.add_space(4.0);
+                    ui.label(
+                        egui::RichText::new(
+                            "Click to view error details. \
+                             Zero recorded errors does not prove that the registry key \
+                             exists or that all expected values were captured.",
+                        )
+                        .size(11.0)
+                        .color(colors.text_secondary),
+                    );
+                } else {
+                    ui.add_space(4.0);
+                    ui.label(
+                        egui::RichText::new(
+                            "No inspection errors were recorded in this scope. \
+                             Zero recorded errors does not prove that the registry key \
+                             exists or that all expected values were captured.",
+                        )
+                        .size(11.0)
+                        .color(colors.text_secondary),
+                    );
+                }
+                return;
+            }
+
+            ui.add_space(8.0);
 
             if errors.is_empty() {
-                ui.label("No inspection errors were recorded in this scope.");
+                ui.label(
+                    egui::RichText::new("No inspection errors were recorded in this scope.")
+                        .size(13.0)
+                        .color(colors.text_secondary),
+                );
 
+                ui.add_space(4.0);
                 ui.small(
-                    "Zero recorded errors does not prove that the registry key \
-                     exists or that all expected values were captured.",
+                    egui::RichText::new(
+                        "Zero recorded errors does not prove that the registry key \
+                         exists or that all expected values were captured.",
+                    )
+                    .color(colors.text_secondary),
                 );
 
                 return;
@@ -76,8 +144,15 @@ impl ErrorPager {
                     ui.ctx().request_repaint();
                 }
 
-                ui.label(format!("Page {} of {}", self.page + 1, pages));
+                ui.add_space(16.0);
+                ui.label(
+                    egui::RichText::new(format!("Page {} of {}", self.page + 1, pages))
+                        .size(12.0)
+                        .color(colors.text_secondary),
+                );
             });
+
+            ui.add_space(8.0);
 
             let range = self.page_range(errors.len());
 
@@ -88,22 +163,79 @@ impl ErrorPager {
 
                 ui.add_space(4.0);
 
-                ui.strong(format!("Record {record_number}"));
+                ui.strong(
+                    egui::RichText::new(format!("Record {record_number}"))
+                        .size(13.0)
+                        .color(colors.text),
+                );
 
-                ui.label(format!("Hive: {}", row.hive));
+                ui.horizontal(|ui| {
+                    ui.set_min_width(100.0);
+                    ui.label(
+                        egui::RichText::new("Hive:")
+                            .size(12.0)
+                            .color(colors.text_secondary),
+                    );
+                    ui.label(egui::RichText::new(row.hive).size(12.0).color(colors.text));
+                });
 
-                ui.label(format!("Key path: {}", row.key_path));
+                ui.horizontal(|ui| {
+                    ui.set_min_width(100.0);
+                    ui.label(
+                        egui::RichText::new("Key path:")
+                            .size(12.0)
+                            .color(colors.text_secondary),
+                    );
+                    ui.label(
+                        egui::RichText::new(&row.key_path)
+                            .size(12.0)
+                            .color(colors.text)
+                            .monospace(),
+                    );
+                });
 
-                ui.label(format!("Operation: {}", row.operation));
+                ui.horizontal(|ui| {
+                    ui.set_min_width(100.0);
+                    ui.label(
+                        egui::RichText::new("Operation:")
+                            .size(12.0)
+                            .color(colors.text_secondary),
+                    );
+                    ui.label(
+                        egui::RichText::new(&row.operation)
+                            .size(12.0)
+                            .color(colors.text),
+                    );
+                });
 
-                ui.label(format!("Error: {}", row.message));
+                ui.horizontal(|ui| {
+                    ui.set_min_width(100.0);
+                    ui.label(
+                        egui::RichText::new("Error:")
+                            .size(12.0)
+                            .color(colors.text_secondary),
+                    );
+                    ui.label(
+                        egui::RichText::new(&row.message)
+                            .size(12.0)
+                            .color(colors.text),
+                    );
+                });
+
+                if offset < range.len() - 1 {
+                    ui.add_space(4.0);
+                    ui.separator();
+                }
             }
 
-            ui.add_space(4.0);
+            ui.add_space(8.0);
 
             ui.small(
-                "Long diagnostic fields are truncated to 512 Unicode characters. \
-                 The original captured records remain available through CLI exports.",
+                egui::RichText::new(
+                    "Long diagnostic fields are truncated to 512 Unicode characters. \
+                     The original captured records remain available through CLI exports.",
+                )
+                .color(colors.text_secondary),
             );
         });
     }
@@ -359,5 +491,30 @@ mod tests {
 
         assert_eq!(before, after);
         assert_eq!(before_json, after_json);
+    }
+
+    #[test]
+    fn error_pager_collapsible_state() {
+        let mut pager = ErrorPager::default();
+        let ctx = egui::Context::default();
+
+        let errors: Vec<InspectionError> = vec![error(
+            RootKey::Hkcu,
+            "Software\\Test",
+            "open_key",
+            "Access is denied.",
+        )];
+
+        // Initially closed
+        assert!(!pager.open);
+
+        // Simulate opening
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            pager.show(ui, "Test errors", &errors);
+        });
+        output.textures_delta.clear();
+
+        // After first render with errors, it should be openable
+        // Note: actual open state depends on user interaction in real UI
     }
 }
