@@ -8,7 +8,7 @@ use winview_core::RegistryReader;
 
 use super::inspection::InspectionState;
 
-use super::advanced::show_advanced;
+use super::advanced::AdvancedBrowser;
 use super::folder_types::FolderBrowser;
 use super::overview::show_overview;
 use super::registry_browser::RegistryBrowser;
@@ -28,6 +28,7 @@ pub struct WinViewApp {
     page: InspectorPage,
     folder_browser: FolderBrowser,
     registry_browser: RegistryBrowser,
+    advanced_browser: AdvancedBrowser,
 }
 
 impl eframe::App for WinViewApp {
@@ -67,6 +68,8 @@ impl eframe::App for WinViewApp {
                 self.folder_browser = FolderBrowser::default();
 
                 self.registry_browser = RegistryBrowser::default();
+
+                self.advanced_browser = AdvancedBrowser::default();
 
                 self.page = InspectorPage::Overview;
             }
@@ -155,7 +158,7 @@ impl eframe::App for WinViewApp {
                             egui::ScrollArea::vertical()
                                 .id_salt("advanced_settings_scroll")
                                 .show(ui, |ui| {
-                                    show_advanced(ui, &result.snapshot.advanced);
+                                    self.advanced_browser.show(ui, &result.snapshot.advanced);
                                 });
                         }
 

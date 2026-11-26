@@ -167,6 +167,10 @@ Current GUI state:
 - Explicit distinction between unavailable values and captured values (including empty strings).
 - These records are captured registry snapshots, not necessarily the effective settings Explorer applies.
 - Advanced settings browser with seven supported settings (HideFileExt, UseCompactMode, AutoCheckSelect, Hidden, LaunchTo, FullRowSelect, NoStrCmpLogical), numeric DWORD values, distinct read and decoding statuses, and read-only behavior.
+- Select one of the seven supported Advanced settings to open its captured raw value details in the shared read-only detail panel; raw and decoded previews use the existing bounded renderer (64 hex bytes, 160 text characters, 8 multi-string entries).
+- Missing and failed observations remain distinct; a setting with no captured observation is reported explicitly and never fabricated or treated as zero.
+- Unexpected registry types can still be inspected in the detail panel without being treated as valid Advanced DWORD settings in the main table.
+- Refresh clears the Advanced selection; switching GUI tabs preserves it.
 - No configuration editing is supported.
 
 ### Registry domain browser

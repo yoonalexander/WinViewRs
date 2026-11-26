@@ -68,55 +68,92 @@ fn advanced_rows(advanced: &KeySnapshot) -> [AdvancedRow; 7] {
     })
 }
 
-pub(super) fn show_advanced(ui: &mut egui::Ui, advanced: &KeySnapshot) {
-    ui.heading("Advanced Explorer settings");
+#[derive(Default)]
+pub(super) struct AdvancedBrowser {
+    selected_value: Option<&'static str>,
+}
 
-    ui.label(format!("HKCU\\{ADVANCED}"));
+impl AdvancedBrowser {
+    fn select_value(&mut self, name: &'static str) {
+        if SETTINGS.iter().any(|(key, _)| *key == name) {
+            self.selected_value = Some(name);
+        }
+    }
 
-    ui.label(format!(
-        "Key-level recorded errors: {}",
-        advanced.read_errors.len()
-    ));
+    fn selected_observation<'a>(&self, advanced: &'a KeySnapshot) -> Option<&'a ValueReadResult> {
+        advanced.values.get(self.selected_value?)
+    }
 
-    ui.small(
-        "Recorded registry values only. \
-         These may not represent effective \
-         Explorer settings.",
-    );
+    pub(super) fn show(&mut self, ui: &mut egui::Ui, advanced: &KeySnapshot) {
+        ui.heading("Advanced Explorer settings");
 
-    ui.add_space(8.0);
+        ui.label(format!("HKCU\\{ADVANCED}"));
 
-    egui::Grid::new("advanced_settings_grid")
-        .num_columns(3)
-        .striped(true)
-        .show(ui, |ui| {
-            ui.strong("Setting");
-            ui.strong("Value");
-            ui.strong("Read status");
+        ui.label(format!(
+            "Key-level recorded errors: {}",
+            advanced.read_errors.len()
+        ));
 
-            ui.end_row();
+        ui.small(
+            "Recorded registry values only. \
+             These may not represent effective \
+             Explorer settings.",
+        );
 
-            for row in advanced_rows(advanced) {
-                ui.vertical(|ui| {
-                    ui.label(row.label);
-                    ui.small(row.name);
-                });
+        ui.add_space(8.0);
 
-                ui.label(row.value);
-                ui.label(row.status);
+        egui::Grid::new("advanced_settings_grid")
+            .num_columns(3)
+            .striped(true)
+            .show(ui, |ui| {
+                ui.strong("Setting");
+                ui.strong("Value");
+                ui.strong("Read status");
 
                 ui.end_row();
+
+                for row in advanced_rows(advanced) {
+                    ui.vertical(|ui| {
+                        let selected = self.selected_value == Some(row.name);
+
+                        if ui.selectable_label(selected, row.label).clicked() {
+                            self.select_value(row.name);
+                        }
+
+                        ui.small(row.name);
+                    });
+
+                    ui.label(row.value);
+                    ui.label(row.status);
+
+                    ui.end_row();
+                }
+            });
+
+        ui.add_space(8.0);
+
+        ui.small(
+            "Not captured may indicate an absent key, \
+             an inspection limitation, or an omitted \
+             observation. Missing values do not \
+             imply disabled settings.",
+        );
+
+        if let Some(name) = self.selected_value {
+            match self.selected_observation(advanced) {
+                Some(observation) => {
+                    super::value_details::show_value_details(ui, name, observation);
+                }
+
+                None => {
+                    ui.separator();
+                    ui.heading("Value details");
+                    ui.label(name);
+                    ui.label("No raw observation was captured for this setting.");
+                }
             }
-        });
-
-    ui.add_space(8.0);
-
-    ui.small(
-        "Not captured may indicate an absent key, \
-         an inspection limitation, or an omitted \
-         observation. Missing values do not \
-         imply disabled settings.",
-    );
+        }
+    }
 }
 
 #[cfg(test)]
@@ -412,5 +449,163 @@ mod tests {
         assert_eq!(rows[0].status, "Captured");
         assert_eq!(rows[1].status, "Value not found");
         assert_eq!(rows[2].status, "Access denied");
+    }
+
+    #[test]
+    fn advanced_raw_selection_preserves_supported_settings() {
+        let mut browser = AdvancedBrowser::default();
+
+        assert_eq!(browser.selected_value, None);
+
+        let names = [
+            HIDE_FILE_EXT,
+            USE_COMPACT_MODE,
+            AUTO_CHECK_SELECT,
+            HIDDEN,
+            LAUNCH_TO,
+            FULL_ROW_SELECT,
+            NO_STR_CMP_LOGICAL,
+        ];
+
+        for name in names {
+            browser.select_value(name);
+            assert_eq!(browser.selected_value, Some(name));
+        }
+
+        // Selecting another supported name replaces the previous selection.
+        browser.select_value(HIDE_FILE_EXT);
+        assert_eq!(browser.selected_value, Some(HIDE_FILE_EXT));
+        browser.select_value(LAUNCH_TO);
+        assert_eq!(browser.selected_value, Some(LAUNCH_TO));
+
+        // Selecting the same setting preserves selection.
+        browser.select_value(LAUNCH_TO);
+        assert_eq!(browser.selected_value, Some(LAUNCH_TO));
+
+        // An unsupported name cannot become selected.
+        browser.select_value("UnrelatedValue");
+        assert_eq!(browser.selected_value, Some(LAUNCH_TO));
+
+        // A new default browser clears selection.
+        let fresh = AdvancedBrowser::default();
+        assert_eq!(fresh.selected_value, None);
+    }
+
+    #[test]
+    fn advanced_raw_details_preserve_captured_observations() {
+        let mut snapshot = empty_snapshot();
+
+        snapshot
+            .values
+            .insert(HIDE_FILE_EXT.into(), dword_observation(HIDE_FILE_EXT, 1));
+
+        snapshot.values.insert(
+            USE_COMPACT_MODE.into(),
+            ValueReadResult::Success(RawRegistryValue {
+                key_path: ADVANCED.into(),
+                value_name: USE_COMPACT_MODE.into(),
+                root: RootKey::Hkcu,
+                raw_type_id: 1,
+                raw_bytes: vec![0x41],
+                decoded: Some(RegistryValue::String("x".into())),
+                decoding_status: DecodingStatus::Decoded,
+                source: ObservationSource::HkcuAdvanced,
+            }),
+        );
+
+        snapshot.values.insert(
+            AUTO_CHECK_SELECT.into(),
+            ValueReadResult::Success(RawRegistryValue {
+                key_path: ADVANCED.into(),
+                value_name: AUTO_CHECK_SELECT.into(),
+                root: RootKey::Hkcu,
+                raw_type_id: 4,
+                raw_bytes: vec![1],
+                decoded: None,
+                decoding_status: DecodingStatus::Malformed {
+                    reason: "Invalid DWORD length".into(),
+                },
+                source: ObservationSource::HkcuAdvanced,
+            }),
+        );
+
+        snapshot.values.insert(
+            HIDDEN.into(),
+            ValueReadResult::Failure(ReadError::AccessDenied {
+                path: ADVANCED.into(),
+            }),
+        );
+
+        // LAUNCH_TO is a supported setting with no captured observation.
+        // UnrelatedValue is not supported by SETTINGS.
+        snapshot.values.insert(
+            "UnrelatedValue".into(),
+            dword_observation("UnrelatedValue", 99),
+        );
+
+        let before = count_key_read_errors(&snapshot);
+        let before_json = serde_json::to_string(&snapshot).unwrap();
+
+        let mut browser = AdvancedBrowser::default();
+
+        // The selected DWORD resolves to the exact captured observation.
+        browser.select_value(HIDE_FILE_EXT);
+        let hide = browser.selected_observation(&snapshot).unwrap();
+        assert!(std::ptr::eq(
+            hide,
+            snapshot.values.get(HIDE_FILE_EXT).unwrap()
+        ));
+
+        // The unexpected type resolves to the exact captured observation.
+        browser.select_value(USE_COMPACT_MODE);
+        let compact = browser.selected_observation(&snapshot).unwrap();
+        assert!(std::ptr::eq(
+            compact,
+            snapshot.values.get(USE_COMPACT_MODE).unwrap()
+        ));
+
+        // The malformed observation remains accessible.
+        browser.select_value(AUTO_CHECK_SELECT);
+        let malformed = browser.selected_observation(&snapshot).unwrap();
+        assert!(std::ptr::eq(
+            malformed,
+            snapshot.values.get(AUTO_CHECK_SELECT).unwrap()
+        ));
+
+        // The failed read remains accessible.
+        browser.select_value(HIDDEN);
+        let failed = browser.selected_observation(&snapshot).unwrap();
+        assert!(std::ptr::eq(failed, snapshot.values.get(HIDDEN).unwrap()));
+
+        // The missing observation resolves to None.
+        browser.select_value(LAUNCH_TO);
+        assert!(browser.selected_observation(&snapshot).is_none());
+
+        // An unsupported setting cannot expose an unrelated value.
+        browser.select_value("UnrelatedValue");
+        assert_eq!(browser.selected_value, Some(LAUNCH_TO));
+        assert!(browser.selected_observation(&snapshot).is_none());
+
+        // Exercise the actual renderer with an egui context.
+        let ctx = egui::Context::default();
+        for name in [
+            HIDE_FILE_EXT,
+            USE_COMPACT_MODE,
+            AUTO_CHECK_SELECT,
+            HIDDEN,
+            LAUNCH_TO,
+        ] {
+            browser.select_value(name);
+            let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+                browser.show(ui, &snapshot);
+            });
+            output.textures_delta.clear();
+        }
+
+        let after = count_key_read_errors(&snapshot);
+        let after_json = serde_json::to_string(&snapshot).unwrap();
+
+        assert_eq!(before, after);
+        assert_eq!(before_json, after_json);
     }
 }
