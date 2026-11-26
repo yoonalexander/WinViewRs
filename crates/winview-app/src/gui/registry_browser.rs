@@ -596,6 +596,42 @@ mod tests {
         let (ve, vhn) = page_entries(&vm, None);
         assert_eq!(ve.len(), 25);
         assert!(vhn);
+
+        let map: BTreeMap<String, KeySnapshot> = (0..51)
+            .map(|i| (format!("k{i:02}"), KeySnapshot::default()))
+            .collect();
+        let mut cursor = PageCursor::default();
+        let (first, has_next) = page_entries(&map, cursor.after.as_deref());
+        assert_eq!(first.len(), 25);
+        assert_eq!(cursor.page_number(), 1);
+        assert!(has_next);
+        cursor.next(first.last().unwrap().0);
+        let (second, has_next) = page_entries(&map, cursor.after.as_deref());
+        assert_eq!(second.len(), 25);
+        assert_eq!(second[0].0.as_str(), "k25");
+        assert_eq!(cursor.page_number(), 2);
+        assert!(has_next);
+        cursor.next(second.last().unwrap().0);
+        let (third, has_next) = page_entries(&map, cursor.after.as_deref());
+        assert_eq!(third.len(), 1);
+        assert_eq!(third[0].0.as_str(), "k50");
+        assert_eq!(cursor.page_number(), 3);
+        assert!(!has_next);
+        cursor.previous();
+        assert_eq!(cursor.page_number(), 2);
+        let (returned, _) = page_entries(&map, cursor.after.as_deref());
+        assert_eq!(
+            returned.iter().map(|e| e.0).collect::<Vec<_>>(),
+            second.iter().map(|e| e.0).collect::<Vec<_>>()
+        );
+        cursor.previous();
+        assert_eq!(cursor.page_number(), 1);
+        assert!(cursor.after.is_none());
+        cursor.next(first.last().unwrap().0);
+        cursor.reset();
+        assert_eq!(cursor.page_number(), 1);
+        assert!(cursor.after.is_none());
+        assert!(cursor.history.is_empty());
     }
 
     #[test]
