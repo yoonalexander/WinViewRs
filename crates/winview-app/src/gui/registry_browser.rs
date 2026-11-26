@@ -743,69 +743,175 @@ mod tests {
 
     #[test]
     fn registry_value_metadata_preserves_read_states() {
-        assert_eq!(
-            observation_status(&ValueReadResult::Success(RawRegistryValue {
-                key_path: "k".into(),
-                value_name: "".into(),
-                root: winview_core::RootKey::Hkcu,
-                raw_type_id: 4,
-                raw_bytes: vec![],
-                decoded: Some(winview_core::model::RegistryValue::Dword(0)),
-                decoding_status: DecodingStatus::Decoded,
-                source: winview_core::model::ObservationSource::HkcuBags,
-            })),
-            "Decoded"
+        use winview_core::model::{ObservationSource, RegistryValue};
+        use winview_core::RootKey;
+
+        fn observation(
+            name: &str,
+            type_id: u32,
+            bytes: Vec<u8>,
+            decoded: Option<RegistryValue>,
+            status: DecodingStatus,
+        ) -> ValueReadResult {
+            ValueReadResult::Success(RawRegistryValue {
+                key_path: r"Software\Test".into(),
+                value_name: name.into(),
+                root: RootKey::Hkcu,
+                raw_type_id: type_id,
+                raw_bytes: bytes,
+                decoded,
+                decoding_status: status,
+                source: ObservationSource::HkcuBags,
+            })
+        }
+
+        fn assert_metadata(
+            name: &str,
+            observation: &ValueReadResult,
+            expected_name: &str,
+            expected_type: &str,
+            expected_size: &str,
+            expected_status: &str,
+        ) {
+            let metadata = value_metadata(name, observation);
+
+            assert_eq!(metadata.name, expected_name);
+            assert_eq!(metadata.type_id, expected_type);
+            assert_eq!(metadata.payload_size, expected_size);
+            assert_eq!(metadata.status, expected_status);
+        }
+
+        let dword = observation(
+            "Mode",
+            4,
+            0u32.to_le_bytes().to_vec(),
+            Some(RegistryValue::Dword(0)),
+            DecodingStatus::Decoded,
         );
 
-        assert_eq!(
-            observation_status(&ValueReadResult::Success(RawRegistryValue {
-                key_path: "k".into(),
-                value_name: "".into(),
-                root: winview_core::RootKey::Hkcu,
-                raw_type_id: 99,
-                raw_bytes: vec![],
-                decoded: None,
-                decoding_status: DecodingStatus::UnknownType,
-                source: winview_core::model::ObservationSource::HkcuBags,
-            })),
-            "Unknown registry type"
+        assert_metadata("Mode", &dword, "Mode", "4", "4 bytes", "Decoded");
+
+        let empty_binary = observation(
+            "",
+            3,
+            vec![],
+            Some(RegistryValue::Binary(vec![])),
+            DecodingStatus::Decoded,
         );
 
-        assert_eq!(
-            observation_status(&ValueReadResult::Success(RawRegistryValue {
-                key_path: "k".into(),
-                value_name: "".into(),
-                root: winview_core::RootKey::Hkcu,
-                raw_type_id: 4,
-                raw_bytes: vec![1],
-                decoded: None,
-                decoding_status: DecodingStatus::Malformed { reason: "x".into() },
-                source: winview_core::model::ObservationSource::HkcuBags,
-            })),
-            "Malformed data"
+        assert_metadata("", &empty_binary, "(Default)", "3", "0 bytes", "Decoded");
+
+        let unknown = observation(
+            "Unknown",
+            99,
+            vec![1, 2, 3],
+            None,
+            DecodingStatus::UnknownType,
         );
 
-        assert_eq!(
-            observation_status(&ValueReadResult::Failure(ReadError::ValueNotFound {
-                name: "v".into()
-            })),
-            "Value not found"
+        assert_metadata(
+            "Unknown",
+            &unknown,
+            "Unknown",
+            "99",
+            "3 bytes",
+            "Unknown registry type",
         );
-        assert_eq!(
-            observation_status(&ValueReadResult::Failure(ReadError::KeyNotFound {
-                path: "p".into()
-            })),
-            "Key not found"
+
+        let malformed = observation(
+            "Malformed",
+            4,
+            vec![1],
+            None,
+            DecodingStatus::Malformed {
+                reason: "Invalid DWORD length".into(),
+            },
         );
-        assert_eq!(
-            observation_status(&ValueReadResult::Failure(ReadError::AccessDenied {
-                path: "p".into()
-            })),
-            "Access denied"
+
+        assert_metadata(
+            "Malformed",
+            &malformed,
+            "Malformed",
+            "4",
+            "1 bytes",
+            "Malformed data",
         );
-        assert_eq!(
-            observation_status(&ValueReadResult::Failure(ReadError::Other("e".into()))),
-            "Read failed"
+
+        for (error, expected_status) in [
+            (
+                ReadError::ValueNotFound {
+                    name: "Missing".into(),
+                },
+                "Value not found",
+            ),
+            (
+                ReadError::KeyNotFound {
+                    path: r"Software\Test".into(),
+                },
+                "Key not found",
+            ),
+            (
+                ReadError::AccessDenied {
+                    path: r"Software\Test".into(),
+                },
+                "Access denied",
+            ),
+            (ReadError::Other("Injected error".into()), "Read failed"),
+        ] {
+            assert_metadata(
+                "Missing",
+                &ValueReadResult::Failure(error),
+                "Missing",
+                "Unavailable",
+                "Unavailable",
+                expected_status,
+            );
+        }
+
+        let long_name = "한".repeat(161);
+
+        let long_observation = observation(
+            &long_name,
+            4,
+            1u32.to_le_bytes().to_vec(),
+            Some(RegistryValue::Dword(1)),
+            DecodingStatus::Decoded,
         );
+
+        let metadata = value_metadata(&long_name, &long_observation);
+
+        assert_eq!(metadata.name, format!("{}…", "한".repeat(160)),);
+
+        assert_eq!(metadata.name.chars().count(), 161);
+        assert_eq!(metadata.type_id, "4");
+        assert_eq!(metadata.payload_size, "4 bytes");
+        assert_eq!(metadata.status, "Decoded");
+
+        // Metadata formatting must not alter captured data
+        // or introduce additional inspection errors.
+        let mut key = KeySnapshot::default();
+
+        key.values.insert("Mode".into(), dword);
+        key.values.insert("".into(), empty_binary);
+        key.values.insert("Unknown".into(), unknown);
+        key.values.insert("Malformed".into(), malformed);
+
+        key.values.insert(
+            "Missing".into(),
+            ValueReadResult::Failure(ReadError::ValueNotFound {
+                name: "Missing".into(),
+            }),
+        );
+
+        let before = serde_json::to_string(&key).unwrap();
+
+        for (name, observation) in &key.values {
+            let _ = value_metadata(name, observation);
+        }
+
+        let after = serde_json::to_string(&key).unwrap();
+
+        assert_eq!(before, after);
+        assert!(key.read_errors.is_empty());
     }
 }
