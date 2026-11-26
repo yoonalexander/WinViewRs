@@ -471,6 +471,17 @@ mod tests {
             root_identity("Software\\Policies"),
             ("HKCU", "Software\\Policies")
         );
+
+        for (domain, expected) in [
+            (RegistryDomain::Bags, "bagroot"),
+            (RegistryDomain::Streams, "streamroot"),
+            (RegistryDomain::Clsid, "clsidroot"),
+            (RegistryDomain::Policies, "HKLM\\pol"),
+        ] {
+            let keys: Vec<_> = domain.roots(&snap).keys().map(String::as_str).collect();
+
+            assert_eq!(keys, vec![expected]);
+        }
     }
 
     #[test]
