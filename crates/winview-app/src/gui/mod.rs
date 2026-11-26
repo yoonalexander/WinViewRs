@@ -7,6 +7,8 @@ pub mod app;
 #[cfg(feature = "gui")]
 mod diagnostics;
 #[cfg(feature = "gui")]
+mod export;
+#[cfg(feature = "gui")]
 pub mod folder_types;
 #[cfg(feature = "gui")]
 pub mod inspection;

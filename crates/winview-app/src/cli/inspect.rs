@@ -94,7 +94,7 @@ pub(super) fn write_snapshot_summary(
     Ok(())
 }
 
-pub(super) fn write_snapshot_json(
+pub(crate) fn write_snapshot_json(
     snapshot: &InspectionSnapshot,
     mut writer: impl Write,
 ) -> Result<()> {

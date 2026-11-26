@@ -176,6 +176,22 @@ Current GUI state:
 - Recorded errors remain distinct from failed value observations; identical recorded errors stay separately visible, and overlapping captured registry roots may contain separately recorded errors that are not deduplicated. Zero recorded errors is not treated as proof that a key exists or that all expected values were captured.
 - No configuration editing is supported.
 
+### Snapshot JSON export
+
+The GUI can export the existing captured snapshot to a JSON file without performing another inspection:
+
+- Export is available only after a snapshot has been captured, for Complete, Partial, and Failed snapshots alike.
+- The destination must be an explicit absolute path ending in `.json`; the application never writes to a default destination automatically.
+- Serialization and filesystem writing run on a background worker, so the GUI remains responsive while an export is in progress.
+- Existing files are never overwritten; export uses create-new semantics and fails if the destination already exists.
+- The export contains the complete captured snapshot, including raw registry values and recorded diagnostics, not just the displayed previews.
+- Snapshots may contain personal paths and system-specific information. Inspect and redact exports before sharing them.
+- A failed or interrupted write may leave an incomplete new file. Export is not atomic and is not crash-safe.
+- The exported JSON is not a restorable registry backup.
+- Keep the application open until the export completes.
+
+The CLI commands and exit codes are unchanged by GUI export.
+
 ### Registry domain browser
 
 - Reusable read-only browser for Bags, Streams, CLSID, and Policies domains.

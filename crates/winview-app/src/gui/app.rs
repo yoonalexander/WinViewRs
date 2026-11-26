@@ -10,6 +10,7 @@ use super::inspection::InspectionState;
 
 use super::advanced::AdvancedBrowser;
 use super::diagnostics::ErrorPager;
+use super::export::ExportBrowser;
 use super::folder_types::FolderBrowser;
 use super::overview::show_overview;
 use super::registry_browser::RegistryBrowser;
@@ -31,11 +32,13 @@ pub struct WinViewApp {
     registry_browser: RegistryBrowser,
     advanced_browser: AdvancedBrowser,
     global_error_pager: ErrorPager,
+    export_browser: ExportBrowser,
 }
 
 impl eframe::App for WinViewApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.inspection.poll();
+        self.export_browser.poll();
 
         egui::CentralPanel::default().show(ui, |ui| {
             ui.heading("WinViewRs");
@@ -50,6 +53,8 @@ impl eframe::App for WinViewApp {
 
             let loading = self.inspection.is_loading();
 
+            let exporting = self.export_browser.is_running();
+
             let button_label = if loading {
                 "Inspecting..."
             } else if matches!(&self.inspection, InspectionState::Idle) {
@@ -59,7 +64,7 @@ impl eframe::App for WinViewApp {
             };
 
             if ui
-                .add_enabled(!loading, egui::Button::new(button_label))
+                .add_enabled(!loading && !exporting, egui::Button::new(button_label))
                 .clicked()
                 && self.inspection.start(|| {
                     let reader = winview_registry::WindowsRegistryReader;
@@ -74,6 +79,8 @@ impl eframe::App for WinViewApp {
                 self.advanced_browser = AdvancedBrowser::default();
 
                 self.global_error_pager = ErrorPager::default();
+
+                self.export_browser.reset();
 
                 self.page = InspectorPage::Overview;
             }
@@ -118,6 +125,10 @@ impl eframe::App for WinViewApp {
                         "Recorded inspection errors: {}",
                         result.error_count
                     ));
+
+                    self.export_browser.show(ui, &result.snapshot);
+
+                    ui.add_space(8.0);
 
                     ui.horizontal(|ui| {
                         ui.selectable_value(&mut self.page, InspectorPage::Overview, "Overview");

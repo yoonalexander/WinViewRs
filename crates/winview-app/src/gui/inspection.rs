@@ -1,5 +1,6 @@
 // winview-app/src/gui/inspection.rs
 
+use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 
 use winview_core::inspection::count_snapshot_read_errors;
@@ -10,7 +11,7 @@ use super::folder_types::FolderTypesIndex;
 use super::overview::InspectionOverview;
 
 pub(super) struct CapturedInspection {
-    pub(super) snapshot: InspectionSnapshot,
+    pub(super) snapshot: Arc<InspectionSnapshot>,
     pub(super) error_count: usize,
     pub(super) overview: InspectionOverview,
     pub(super) folder_index: FolderTypesIndex,
@@ -53,7 +54,7 @@ impl InspectionState {
                 let folder_index = FolderTypesIndex::from_snapshot(&snapshot);
 
                 Ok(CapturedInspection {
-                    snapshot,
+                    snapshot: Arc::new(snapshot),
                     error_count,
                     overview,
                     folder_index,
