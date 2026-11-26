@@ -12,8 +12,9 @@ The current implementation is a **read-only Explorer configuration inspector**. 
 
 ## Current status
 
-- **Phase 0: Read-only inspection foundation** — implemented. Registry reads, value decoding, structured snapshots, CLI output, and resource-bounded traversal.
-- **Phase 1: Read-only desktop GUI** — inspection overview and Windows metadata displayed. The native GUI launches and connects to the registry inspector.
+- **Phase 0: Read-only inspection foundation** — complete. Registry reads, value decoding, structured snapshots, CLI output, and resource-bounded traversal. See `docs/PHASE_0_COMPLETION.md`.
+- **Phase 1: Read-only desktop GUI** — implementation complete. Inspection overview, FolderTypes, Advanced settings, registry domain browsing, scoped recorded diagnostics, and background snapshot JSON export. Automated verification passed; interactive manual acceptance is pending. See `docs/PHASE_1_COMPLETION.md`.
+- **Phase 2 (snapshot/restore and mutation) — not authorized.** No configuration mutation, apply, restore, or reset functionality exists.
 - **Later phases**: Configuration planning, backups, restoration, and explicitly authorized application of changes.
 
 ## Features
@@ -221,13 +222,13 @@ The CLI commands and exit codes are unchanged by GUI export.
 
 ## Known limitations
 
-See `docs/PHASE_0_COMPLETION.md` for the complete list of known limitations and their classification.
+See `docs/PHASE_0_COMPLETION.md` and `docs/PHASE_1_COMPLETION.md` for the complete list of known limitations and their classification.
 
 ## Roadmap
 
-- Phase 0: Read-only foundation.
-- Phase 1: Native read-only inspector GUI.
-- Future phases: Typed configuration, change planning, backup, restore, and safe application.
+- Phase 0: Read-only foundation — complete.
+- Phase 1: Native read-only inspector GUI — implementation complete; manual acceptance pending.
+- Phase 2 (not authorized): Typed configuration, change planning, backup, restore, and safe application behind a separate approved design.
 
 No dates are promised.
 

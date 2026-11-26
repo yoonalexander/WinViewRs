@@ -62,6 +62,8 @@ Clearly attribute Les Ferch and distinguish the Rust implementation from the ori
 
 Phase 0: Complete. Baseline established in `docs/PHASE_0_COMPLETION.md`.
 
-Phase 1: Read-only desktop GUI foundation — native window launch implemented, registry inspection not yet connected.
+Phase 1: Read-only desktop GUI — implementation complete. Automated verification passed at commit `3a36b33`; interactive manual acceptance is pending. Exit audit recorded in `docs/PHASE_1_COMPLETION.md`.
+
+Phase 2: Not authorized. No registry mutation, apply, restore, or reset functionality is permitted until a separate design is approved.
 
 No registry modifications are authorized.
