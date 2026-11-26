@@ -475,38 +475,46 @@ mod tests {
 
     #[test]
     fn registry_browser_preserves_hive_identity() {
-        let mut snap = InspectionSnapshot::default();
-        let mut hklm = KeySnapshot::default();
-        let mut child = KeySnapshot::default();
-        child.values.insert(
-            "x".into(),
-            ValueReadResult::Success(RawRegistryValue {
-                key_path: "HKLM\\p".into(),
-                value_name: "x".into(),
-                root: winview_core::RootKey::Hklm,
-                raw_type_id: 4,
-                raw_bytes: vec![1, 0, 0, 0],
-                decoded: None,
-                decoding_status: DecodingStatus::Decoded,
-                source: winview_core::model::ObservationSource::HklmPolicies,
-            }),
-        );
-        hklm.subkeys.insert("HKLM\\p\\child".into(), child);
-        snap.policies.insert("HKLM\\p".into(), hklm);
+        let mut snapshot = InspectionSnapshot::default();
 
-        let hkcu = KeySnapshot::default();
-        snap.policies.insert("p".into(), hkcu);
+        let root_path = r"Software\Policies\Test";
+        let hklm_path = r"HKLM\Software\Policies\Test";
+        let child_path = r"Software\Policies\Test\Child";
 
-        let roots = RegistryDomain::Policies.roots(&snap);
-        let _ = resolve_key(roots, &["HKLM\\p".to_string()]).unwrap();
-        let nested = resolve_key(
-            roots,
-            &["HKLM\\p".to_string(), "HKLM\\p\\child".to_string()],
-        )
-        .unwrap();
-        assert!(nested.values.contains_key("x"));
-        let resolved_hkcu = resolve_key(roots, &["p".to_string()]);
-        assert!(resolved_hkcu.is_some());
+        for (root_key, value_name) in [(root_path, "UserValue"), (hklm_path, "SystemValue")] {
+            let mut root = KeySnapshot::default();
+            let mut child = KeySnapshot::default();
+
+            child.values.insert(
+                value_name.into(),
+                ValueReadResult::Failure(ReadError::ValueNotFound {
+                    name: value_name.into(),
+                }),
+            );
+
+            root.subkeys.insert(child_path.into(), child);
+
+            snapshot.policies.insert(root_key.into(), root);
+        }
+
+        let roots = RegistryDomain::Policies.roots(&snapshot);
+
+        let user_path = vec![root_path.to_string(), child_path.to_string()];
+
+        let system_path = vec![hklm_path.to_string(), child_path.to_string()];
+
+        let user = resolve_key(roots, &user_path).unwrap();
+        let system = resolve_key(roots, &system_path).unwrap();
+
+        assert!(user.values.contains_key("UserValue"));
+        assert!(!user.values.contains_key("SystemValue"));
+
+        assert!(system.values.contains_key("SystemValue"));
+        assert!(!system.values.contains_key("UserValue"));
+
+        assert_eq!(root_identity(&user_path[0]), ("HKCU", root_path),);
+
+        assert_eq!(root_identity(&system_path[0]), ("HKLM", root_path),);
     }
 
     #[test]
@@ -515,19 +523,19 @@ mod tests {
         let mut root = KeySnapshot::default();
         let mut child = KeySnapshot::default();
         let grand = KeySnapshot::default();
-        child.subkeys.insert("root/child/grand".into(), grand);
-        root.subkeys.insert("root/child".into(), child);
+        child.subkeys.insert("root\\child\\grand".into(), grand);
+        root.subkeys.insert("root\\child".into(), child);
         snap.bags.insert("root".into(), root);
 
         let roots = RegistryDomain::Bags.roots(&snap);
         assert!(resolve_key(roots, &["root".to_string()]).is_some());
-        assert!(resolve_key(roots, &["root".to_string(), "root/child".to_string()]).is_some());
+        assert!(resolve_key(roots, &["root".to_string(), "root\\child".to_string()]).is_some());
         assert!(resolve_key(
             roots,
             &[
                 "root".to_string(),
-                "root/child".to_string(),
-                "root/child/grand".to_string()
+                "root\\child".to_string(),
+                "root\\child\\grand".to_string()
             ]
         )
         .is_some());
