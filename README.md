@@ -169,6 +169,15 @@ Current GUI state:
 
 See `docs/PHASE_0_COMPLETION.md` for the complete list of known limitations and their classification.
 
+### Registry domain browser
+
+- Reusable read-only browser for Bags, Streams, CLSID, and Policies domains.
+- Hierarchical key navigation with Roots and Up controls.
+- Bounded key and value pagination (25 records per page).
+- Registry type IDs, payload sizes, and read/decoding statuses.
+- Raw payload inspection and detailed diagnostics remain future work.
+- All displayed information comes from captured read-only snapshots.
+
 ## Roadmap
 
 - Phase 0: Read-only foundation.
@@ -184,12 +193,4 @@ WinSetView is by [Les Ferch](https://github.com/LesFerch/WinSetView) and is lice
 WinViewRs is an independent Rust reimplementation of WinSetView, not an official WinSetView release, and is not affiliated with or endorsed by the original author.
 
 WinViewRs is released under the MIT License. See `LICENSE`. The original copyright and license notices are preserved, and Les Ferch is clearly attributed for reused or adapted material.
-## Registry domain browser
-
-- Reusable read-only browser for Bags, Streams, CLSID, and Policies domains.
-- Hierarchical key navigation with Roots and Up controls.
-- Bounded key and value pagination (25 records per page).
-- Registry type IDs, payload sizes, and read/decoding statuses.
-- Raw payload inspection and detailed diagnostics remain future work.
-- All displayed information comes from captured read-only snapshots.
 

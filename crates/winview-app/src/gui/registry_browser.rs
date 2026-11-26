@@ -307,8 +307,8 @@ impl RegistryBrowser {
                     .clicked()
                 {
                     self.key_page.previous();
+                    ui.ctx().request_repaint();
                 }
-                ui.label(format!("Page {}", self.key_page.page_number()));
                 if ui
                     .add_enabled(child_has_next, egui::Button::new("Next"))
                     .clicked()
@@ -316,7 +316,9 @@ impl RegistryBrowser {
                     if let Some(last) = child_entries.last() {
                         self.key_page.next(last.0.as_str());
                     }
+                    ui.ctx().request_repaint();
                 }
+                ui.label(format!("Page {}", self.key_page.page_number()));
             });
         });
 
@@ -395,8 +397,8 @@ impl RegistryBrowser {
                     .clicked()
                 {
                     self.value_page.previous();
+                    ui.ctx().request_repaint();
                 }
-                ui.label(format!("Page {}", self.value_page.page_number()));
                 if ui
                     .add_enabled(val_has_next, egui::Button::new("Next"))
                     .clicked()
@@ -404,7 +406,9 @@ impl RegistryBrowser {
                     if let Some(last) = val_entries.last() {
                         self.value_page.next(last.0.as_str());
                     }
+                    ui.ctx().request_repaint();
                 }
+                ui.label(format!("Page {}", self.value_page.page_number()));
             });
         });
 
