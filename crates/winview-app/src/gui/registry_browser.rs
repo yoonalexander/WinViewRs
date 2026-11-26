@@ -279,21 +279,18 @@ impl RegistryBrowser {
         ui.label(format!("Current hive: {}", hive));
         ui.label(format!("Registry path: {}", path_display));
 
-        let (child_map, value_map, _errors) = if let Some(key) = current_key {
-            (&key.subkeys, &key.values, &key.read_errors)
+        let (child_map, value_map) = if let Some(key) = current_key {
+            (&key.subkeys, &key.values)
         } else {
-            // roots level: treat roots as children? We show root records as child list
-            // We'll handle roots separately
-            (roots, &BTreeMap::new(), &Vec::new())
+            (roots, &BTreeMap::new())
         };
 
-        // For roots level, show roots as children
         let at_roots = self.path.is_empty();
 
         if at_roots {
             ui.label(format!("Immediate child records: {}", roots.len()));
             ui.label("Value records: 0");
-            ui.label(format!("Direct key errors: {}", 0));
+            ui.label("Direct key errors: No key selected");
         } else if let Some(key) = current_key {
             ui.label(format!("Immediate child records: {}", key.subkeys.len()));
             ui.label(format!("Value records: {}", key.values.len()));

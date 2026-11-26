@@ -197,16 +197,18 @@ impl FolderBrowser {
                 .clicked()
             {
                 self.select_page(self.page.saturating_sub(1), keys.len());
+                ui.ctx().request_repaint();
             }
-
-            ui.label(format!("Page {} of {}", self.page + 1, pages,));
 
             if ui
                 .add_enabled(self.page + 1 < pages, egui::Button::new("Next"))
                 .clicked()
             {
                 self.select_page(self.page + 1, keys.len());
+                ui.ctx().request_repaint();
             }
+
+            ui.label(format!("Page {} of {}", self.page + 1, pages,));
         });
 
         let range = self.page_range(keys.len());
@@ -291,6 +293,7 @@ impl FolderBrowser {
                     .clicked()
                 {
                     self.select_view(self.view_index.saturating_sub(1));
+                    ui.ctx().request_repaint();
                 }
 
                 if ui
@@ -298,6 +301,7 @@ impl FolderBrowser {
                     .clicked()
                 {
                     self.select_view(self.view_index + 1);
+                    ui.ctx().request_repaint();
                 }
 
                 ui.label(format!("View {} of {}", self.view_index + 1, count,));

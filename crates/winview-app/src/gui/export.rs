@@ -3,7 +3,6 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
 
 use anyhow::{ensure, Context, Result};
 use eframe::egui;
@@ -136,7 +135,7 @@ impl ExportBrowser {
         let path = PathBuf::from(self.destination.trim());
 
         self.state.start_with(move || {
-            export_snapshot_json(&snapshot, &path).map_err(|error| error.to_string())?;
+            export_snapshot_json(&snapshot, &path).map_err(|error| format!("{error:#}"))?;
 
             Ok(path)
         })
@@ -150,7 +149,7 @@ impl ExportBrowser {
         let running = self.is_running();
 
         egui::CollapsingHeader::new("Export captured snapshot")
-            .default_open(true)
+            .default_open(false)
             .show(ui, |ui| {
                 ui.label(
                     "Exports contain the complete captured snapshot, \
@@ -167,6 +166,7 @@ impl ExportBrowser {
                 ui.add_enabled(
                     !running,
                     egui::TextEdit::singleline(&mut self.destination)
+                        .desired_width(f32::INFINITY)
                         .hint_text(EXAMPLE_DESTINATION),
                 );
 
@@ -179,27 +179,6 @@ impl ExportBrowser {
                     .clicked()
                 {
                     self.start(Arc::clone(snapshot));
-                }
-
-                if self.is_running() {
-                    ui.horizontal(|ui| {
-                        ui.spinner();
-
-                        ui.label("Exporting captured snapshot...");
-                    });
-
-                    ui.ctx().request_repaint_after(Duration::from_millis(50));
-                }
-
-                if let Some(result) = self.state.result() {
-                    match result {
-                        Ok(path) => {
-                            ui.label(format!("Export complete: {}", path.display()));
-                        }
-                        Err(error) => {
-                            ui.label(format!("Export failed: {error}"));
-                        }
-                    }
                 }
 
                 ui.add_space(4.0);
@@ -215,6 +194,29 @@ impl ExportBrowser {
                      Export is not atomic.",
                 );
             });
+
+        if self.is_running() {
+            ui.horizontal_wrapped(|ui| {
+                ui.spinner();
+
+                ui.label("Exporting captured snapshot...");
+            });
+        }
+
+        if let Some(result) = self.state.result() {
+            match result {
+                Ok(path) => {
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label(format!("Export complete: {}", path.display()));
+                    });
+                }
+                Err(error) => {
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label(format!("Export failed: {error}"));
+                    });
+                }
+            }
+        }
     }
 }
 
@@ -223,7 +225,7 @@ mod tests {
     use super::*;
 
     use std::sync::mpsc;
-    use std::time::Instant;
+    use std::time::{Duration, Instant};
 
     use winview_core::model::{
         DecodingStatus, InspectionError, InspectionStatus, ObservationSource, RawRegistryValue,
@@ -329,14 +331,42 @@ mod tests {
 
         std::fs::write(&path, b"sentinel-bytes").unwrap();
 
-        let snapshot = synthetic_snapshot(InspectionStatus::Complete);
+        let snapshot = Arc::new(synthetic_snapshot(InspectionStatus::Complete));
 
-        let error = export_snapshot_json(&snapshot, &path)
-            .expect_err("Existing files must never be overwritten");
+        let mut browser = ExportBrowser {
+            destination: path.display().to_string(),
+            ..Default::default()
+        };
 
-        assert!(error
-            .to_string()
-            .contains("Existing files are never overwritten"));
+        assert!(browser.start(Arc::clone(&snapshot)));
+
+        let deadline = Instant::now() + Duration::from_secs(10);
+
+        while browser.is_running() {
+            browser.poll();
+
+            assert!(Instant::now() < deadline, "Export worker timed out");
+
+            thread::sleep(Duration::from_millis(1));
+        }
+
+        let error = match browser.state.result() {
+            Some(Err(error)) => error.clone(),
+            _ => panic!("Existing files must never be overwritten"),
+        };
+
+        assert!(error.contains("Existing files are never overwritten"));
+
+        let underlying = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .expect_err("create_new must fail on an existing file");
+
+        assert!(
+            error.contains(&underlying.to_string()),
+            "error chain must include the underlying filesystem error: {error}"
+        );
 
         let bytes = std::fs::read(&path).unwrap();
 

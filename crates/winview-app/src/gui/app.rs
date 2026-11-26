@@ -126,11 +126,13 @@ impl eframe::App for WinViewApp {
                         result.error_count
                     ));
 
+                    ui.separator();
+
                     self.export_browser.show(ui, &result.snapshot);
 
-                    ui.add_space(8.0);
+                    ui.separator();
 
-                    ui.horizontal(|ui| {
+                    ui.horizontal_wrapped(|ui| {
                         ui.selectable_value(&mut self.page, InspectorPage::Overview, "Overview");
 
                         ui.selectable_value(
@@ -147,6 +149,8 @@ impl eframe::App for WinViewApp {
                             "Registry domains",
                         );
                     });
+
+                    ui.separator();
 
                     match self.page {
                         InspectorPage::Overview => {
@@ -200,5 +204,9 @@ impl eframe::App for WinViewApp {
                 }
             }
         });
+
+        if self.export_browser.is_running() {
+            ui.ctx().request_repaint_after(Duration::from_millis(50));
+        }
     }
 }

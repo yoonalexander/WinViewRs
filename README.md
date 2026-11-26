@@ -152,45 +152,37 @@ cargo run -p winview-app --features gui -- gui
 
 Current GUI state:
 
-- Manual background inspection and refresh.
+### Inspection and overview
+
+- Manual background inspection and refresh; Run inspection and Refresh inspection controls are disabled while an export is running.
 - Inspection status (Complete, Partial, Failed) and recorded error count displayed.
 - Windows product name, build, UBR, detection method, and capture timestamp shown.
 - Per-domain record and error summaries (7 domains).
+- Overview can browse globally recorded inspection errors through a reusable paginated panel (25 recorded errors per page) with bounded diagnostic text previews (512 Unicode characters) that preserve the original recorded hive, key path, operation, and error message.
+- Explicit distinction between unavailable values and captured values (including empty strings).
+- These records are captured registry snapshots, not necessarily the effective settings Explorer applies.
+- No configuration editing is supported.
+
+### FolderTypes browser
+
 - FolderTypes navigation with separate system-level (HKLM) and user-level (HKCU) records.
-- Paginated folder-type browsing (25 records per page).
+- Paginated folder-type browsing (25 records per page); Previous/Next controls request a repaint and the page label reflects the displayed records.
 - Canonical names and GUIDs displayed for each folder type.
-- Captured TopViews settings shown per view (LogicalViewMode, Mode, IconSize, GroupBy, etc.).
+- Captured TopViews settings shown per view (LogicalViewMode, Mode, IconSize, GroupBy, etc.); Previous view / Next view controls request a repaint.
 - Select a TopViews field to inspect its captured raw observation in a shared read-only detail panel, showing the value name, registry hive, captured key path, observation source, original numeric registry type ID, raw payload size, decoding status, a bounded hexadecimal raw payload preview, and a bounded decoded representation.
 - Previews are bounded (64 bytes of hexadecimal, 160 characters of text, 8 multi-string entries) with explicit truncation indicators; the raw preview is **not** a complete raw payload dump.
 - Fields without a corresponding captured raw observation are explicitly reported as having no raw observation, which is distinct from a failed read or a zero-length payload.
 - The existing normalized field display is unchanged; selection only adds the raw detail panel below it.
-- Explicit distinction between unavailable values and captured values (including empty strings).
-- These records are captured registry snapshots, not necessarily the effective settings Explorer applies.
+- FolderTypes can browse the selected hive-level and selected folder-level errors; changing hive, folder, or folder page resets the relevant diagnostic pager.
+
+### Advanced settings browser
+
 - Advanced settings browser with seven supported settings (HideFileExt, UseCompactMode, AutoCheckSelect, Hidden, LaunchTo, FullRowSelect, NoStrCmpLogical), numeric DWORD values, distinct read and decoding statuses, and read-only behavior.
 - Select one of the seven supported Advanced settings to open its captured raw value details in the shared read-only detail panel; raw and decoded previews use the existing bounded renderer (64 hex bytes, 160 text characters, 8 multi-string entries).
 - Missing and failed observations remain distinct; a setting with no captured observation is reported explicitly and never fabricated or treated as zero.
 - Unexpected registry types can still be inspected in the detail panel without being treated as valid Advanced DWORD settings in the main table.
+- Advanced can browse directly recorded Advanced key errors.
 - Refresh clears the Advanced selection; switching GUI tabs preserves it.
-- Overview can browse globally recorded inspection errors; FolderTypes can browse the selected hive-level and selected folder-level errors; Advanced can browse directly recorded Advanced key errors; Registry domains can browse the selected key's directly recorded errors. All use a reusable paginated panel (25 recorded errors per page) with bounded diagnostic text previews (512 Unicode characters) that preserve the original recorded hive, key path, operation, and error message.
-- Nested registry keys can be navigated individually to inspect their recorded diagnostics; parent and child diagnostics remain separate.
-- Recorded errors remain distinct from failed value observations; identical recorded errors stay separately visible, and overlapping captured registry roots may contain separately recorded errors that are not deduplicated. Zero recorded errors is not treated as proof that a key exists or that all expected values were captured.
-- No configuration editing is supported.
-
-### Snapshot JSON export
-
-The GUI can export the existing captured snapshot to a JSON file without performing another inspection:
-
-- Export is available only after a snapshot has been captured, for Complete, Partial, and Failed snapshots alike.
-- The destination must be an explicit absolute path ending in `.json`; the application never writes to a default destination automatically.
-- Serialization and filesystem writing run on a background worker, so the GUI remains responsive while an export is in progress.
-- Existing files are never overwritten; export uses create-new semantics and fails if the destination already exists.
-- The export contains the complete captured snapshot, including raw registry values and recorded diagnostics, not just the displayed previews.
-- Snapshots may contain personal paths and system-specific information. Inspect and redact exports before sharing them.
-- A failed or interrupted write may leave an incomplete new file. Export is not atomic and is not crash-safe.
-- The exported JSON is not a restorable registry backup.
-- Keep the application open until the export completes.
-
-The CLI commands and exit codes are unchanged by GUI export.
 
 ### Registry domain browser
 
@@ -198,12 +190,34 @@ The CLI commands and exit codes are unchanged by GUI export.
 - Hierarchical key navigation with Roots and Up controls.
 - Bounded key and value pagination (25 records per page).
 - Registry type IDs, payload sizes, and read/decoding statuses.
+- At domain roots the panel reports that no key is selected rather than implying the entire domain has zero errors; actual direct key error counts are shown when a key is selected.
 - Select a captured value to inspect its details: value name (including `(Default)`), registry hive, captured key path, observation source, original numeric registry type ID, total raw payload size, decoding status, a bounded hexadecimal raw payload preview, and a bounded decoded representation.
 - Previews are bounded (64 bytes of hexadecimal, 160 characters of text, 8 multi-string entries) with explicit truncation indicators; the raw preview is **not** a complete raw payload dump.
 - Decoded data is shown only when decoding succeeded; malformed, unknown-type, and failed reads are reported honestly without fabricating bytes.
 - Changing domains, entering keys, going Up, returning to Roots, changing the value page, or refreshing clears the current selection.
 - All displayed information comes from captured read-only snapshots; no additional registry reads are performed.
-- Detailed recorded inspection errors remain deferred.
+
+### Recorded diagnostics
+
+- Overview, FolderTypes (hive and selected folder), Advanced, and Registry domains each provide a reusable paginated diagnostic panel (25 recorded errors per page) with bounded diagnostic text previews (512 Unicode characters) that preserve the original recorded hive, key path, operation, and error message.
+- Nested registry keys can be navigated individually to inspect their recorded diagnostics; parent and child diagnostics remain separate.
+- Recorded errors remain distinct from failed value observations; identical recorded errors stay separately visible, and overlapping captured registry roots may contain separately recorded errors that are not deduplicated. Zero recorded errors is not treated as proof that a key exists or that all expected values were captured.
+
+### Snapshot JSON export
+
+The GUI can export the existing captured snapshot to a JSON file without performing another inspection:
+
+- Export is available only after a snapshot has been captured, for Complete, Partial, and Failed snapshots alike.
+- The destination must be an explicit absolute path ending in `.json`; the application never writes to a default destination automatically.
+- Serialization and filesystem writing run on a background worker, so the GUI remains responsive while an export is in progress; the export panel is collapsed by default and progress and results remain visible even when it is collapsed.
+- Existing files are never overwritten; export uses create-new semantics and fails if the destination already exists, reporting both the contextual message and the underlying filesystem error.
+- The export contains the complete captured snapshot, including raw registry values and recorded diagnostics, not just the displayed previews.
+- Snapshots may contain personal paths and system-specific information. Inspect and redact exports before sharing them.
+- A failed or interrupted write may leave an incomplete new file. Export is not atomic and is not crash-safe.
+- The exported JSON is not a restorable registry backup.
+- Keep the application open until the export completes.
+
+The CLI commands and exit codes are unchanged by GUI export.
 
 ## Known limitations
 
