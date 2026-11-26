@@ -123,7 +123,11 @@ impl eframe::App for WinViewApp {
 
                         ui.selectable_value(&mut self.page, InspectorPage::Advanced, "Advanced");
 
-                        ui.selectable_value(&mut self.page, InspectorPage::RegistryDomains, "Registry domains");
+                        ui.selectable_value(
+                            &mut self.page,
+                            InspectorPage::RegistryDomains,
+                            "Registry domains",
+                        );
                     });
 
                     match self.page {
@@ -159,10 +163,7 @@ impl eframe::App for WinViewApp {
                             egui::ScrollArea::vertical()
                                 .id_salt("registry_domains_scroll")
                                 .show(ui, |ui| {
-                                    self.registry_browser.show(
-                                        ui,
-                                        &result.snapshot,
-                                    );
+                                    self.registry_browser.show(ui, &result.snapshot);
                                 });
                         }
                     }

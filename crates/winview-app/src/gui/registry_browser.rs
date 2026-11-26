@@ -4,11 +4,7 @@ use std::ops::Bound::{Excluded, Unbounded};
 use eframe::egui;
 
 use winview_core::model::{
-    DecodingStatus,
-    InspectionSnapshot,
-    KeySnapshot,
-    ReadError,
-    ValueReadResult,
+    DecodingStatus, InspectionSnapshot, KeySnapshot, ReadError, ValueReadResult,
 };
 
 const PAGE_SIZE: usize = 25;
@@ -24,10 +20,7 @@ enum RegistryDomain {
 }
 
 impl RegistryDomain {
-    fn roots(
-        self,
-        snapshot: &InspectionSnapshot,
-    ) -> &BTreeMap<String, KeySnapshot> {
+    fn roots(self, snapshot: &InspectionSnapshot) -> &BTreeMap<String, KeySnapshot> {
         match self {
             Self::Bags => &snapshot.bags,
             Self::Streams => &snapshot.streams,
@@ -83,10 +76,7 @@ fn page_entries<'a, T>(
             .take(PAGE_SIZE + 1)
             .collect(),
 
-        None => map
-            .iter()
-            .take(PAGE_SIZE + 1)
-            .collect(),
+        None => map.iter().take(PAGE_SIZE + 1).collect(),
     };
 
     let has_next = entries.len() > PAGE_SIZE;
@@ -111,9 +101,7 @@ fn resolve_key<'a>(
     Some(key)
 }
 
-fn root_identity(
-    root_key: &str,
-) -> (&'static str, &str) {
+fn root_identity(root_key: &str) -> (&'static str, &str) {
     match root_key.strip_prefix("HKLM\\") {
         Some(path) => ("HKLM", path),
         None => ("HKCU", root_key),
@@ -140,28 +128,21 @@ struct ValueMetadata {
     status: &'static str,
 }
 
-fn value_metadata(
-    name: &str,
-    observation: &ValueReadResult,
-) -> ValueMetadata {
+fn value_metadata(name: &str, observation: &ValueReadResult) -> ValueMetadata {
     let name = if name.is_empty() {
         "(Default)".into()
     } else {
         preview_text(name)
     };
 
-    let (type_id, payload_size) =
-        match observation {
-            ValueReadResult::Success(raw) => (
-                raw.raw_type_id.to_string(),
-                format!("{} bytes", raw.raw_bytes.len()),
-            ),
+    let (type_id, payload_size) = match observation {
+        ValueReadResult::Success(raw) => (
+            raw.raw_type_id.to_string(),
+            format!("{} bytes", raw.raw_bytes.len()),
+        ),
 
-            ValueReadResult::Failure(_) => (
-                "Unavailable".into(),
-                "Unavailable".into(),
-            ),
-        };
+        ValueReadResult::Failure(_) => ("Unavailable".into(), "Unavailable".into()),
+    };
 
     ValueMetadata {
         name,
@@ -170,31 +151,20 @@ fn value_metadata(
         status: observation_status(observation),
     }
 }
-fn observation_status(
-    observation: &ValueReadResult,
-) -> &'static str {
+fn observation_status(observation: &ValueReadResult) -> &'static str {
     match observation {
         ValueReadResult::Failure(error) => match error {
-            ReadError::ValueNotFound { .. } =>
-                "Value not found",
-            ReadError::KeyNotFound { .. } =>
-                "Key not found",
-            ReadError::AccessDenied { .. } =>
-                "Access denied",
-            ReadError::Other(_) =>
-                "Read failed",
+            ReadError::ValueNotFound { .. } => "Value not found",
+            ReadError::KeyNotFound { .. } => "Key not found",
+            ReadError::AccessDenied { .. } => "Access denied",
+            ReadError::Other(_) => "Read failed",
         },
 
-        ValueReadResult::Success(raw) => {
-            match &raw.decoding_status {
-                DecodingStatus::Decoded =>
-                    "Decoded",
-                DecodingStatus::Malformed { .. } =>
-                    "Malformed data",
-                DecodingStatus::UnknownType =>
-                    "Unknown registry type",
-            }
-        }
+        ValueReadResult::Success(raw) => match &raw.decoding_status {
+            DecodingStatus::Decoded => "Decoded",
+            DecodingStatus::Malformed { .. } => "Malformed data",
+            DecodingStatus::UnknownType => "Unknown registry type",
+        },
     }
 }
 
@@ -235,19 +205,17 @@ impl RegistryBrowser {
         self.reset_pages();
     }
 
-    pub(super) fn show(
-        &mut self,
-        ui: &mut egui::Ui,
-        snapshot: &InspectionSnapshot,
-    ) {
-        let _ = root_identity("");
+    pub(super) fn show(&mut self, ui: &mut egui::Ui, snapshot: &InspectionSnapshot) {
+        ui.heading("Registry domains");
 
         ui.horizontal(|ui| {
-            for d in [RegistryDomain::Bags, RegistryDomain::Streams, RegistryDomain::Clsid, RegistryDomain::Policies] {
-                if ui
-                    .selectable_label(self.domain == d, d.label())
-                    .clicked()
-                {
+            for d in [
+                RegistryDomain::Bags,
+                RegistryDomain::Streams,
+                RegistryDomain::Clsid,
+                RegistryDomain::Policies,
+            ] {
+                if ui.selectable_label(self.domain == d, d.label()).clicked() {
                     self.select_domain(d);
                 }
             }
@@ -266,7 +234,10 @@ impl RegistryBrowser {
             if ui.button("Roots").clicked() {
                 self.go_to_roots();
             }
-            if ui.add_enabled(!self.path.is_empty(), egui::Button::new("Up")).clicked() {
+            if ui
+                .add_enabled(!self.path.is_empty(), egui::Button::new("Up"))
+                .clicked()
+            {
                 self.go_up();
             }
         });
@@ -278,17 +249,27 @@ impl RegistryBrowser {
         };
 
         // hive identity
-        let hive = if let Some(first) = self.path.first() {
-            if first.starts_with("HKLM\\") { "HKLM" } else { "HKCU" }
-        } else {
-            if self.domain == RegistryDomain::Policies { "HKLM/HKCU" } else { "HKCU" }
-        };
+        let hive = self.path.first().map(|key| root_identity(key).0).unwrap_or(
+            if self.domain == RegistryDomain::Policies {
+                "HKLM/HKCU"
+            } else {
+                "HKCU"
+            },
+        );
 
-        let path_display = if self.path.is_empty() {
-            "<roots>".to_string()
-        } else {
-            self.path.last().cloned().unwrap_or_default()
-        };
+        let path_display = self
+            .path
+            .last()
+            .map(|key| {
+                let path = if self.path.len() == 1 {
+                    root_identity(key).1
+                } else {
+                    key.as_str()
+                };
+
+                preview_text(path)
+            })
+            .unwrap_or_else(|| "<roots>".into());
         ui.label(format!("Current hive: {}", hive));
         ui.label(format!("Registry path: {}", path_display));
 
@@ -316,15 +297,22 @@ impl RegistryBrowser {
         // Pagination for child keys
         let child_source: &BTreeMap<String, KeySnapshot> = if at_roots { roots } else { child_map };
 
-        let (child_entries, child_has_next) = page_entries(child_source, self.key_page.after.as_deref());
-ui.push_id("registry_key_pagination", |ui| {
+        let (child_entries, child_has_next) =
+            page_entries(child_source, self.key_page.after.as_deref());
+        ui.push_id("registry_key_pagination", |ui| {
             ui.horizontal(|ui| {
                 let on_first = self.key_page.after.is_none() && self.key_page.history.is_empty();
-                if ui.add_enabled(!on_first, egui::Button::new("Previous")).clicked() {
+                if ui
+                    .add_enabled(!on_first, egui::Button::new("Previous"))
+                    .clicked()
+                {
                     self.key_page.previous();
                 }
                 ui.label(format!("Page {}", self.key_page.page_number()));
-                if ui.add_enabled(child_has_next, egui::Button::new("Next")).clicked() {
+                if ui
+                    .add_enabled(child_has_next, egui::Button::new("Next"))
+                    .clicked()
+                {
                     if let Some(last) = child_entries.last() {
                         self.key_page.next(last.0.as_str());
                     }
@@ -332,17 +320,39 @@ ui.push_id("registry_key_pagination", |ui| {
             });
         });
 
+        let (child_entries, _) = page_entries(child_source, self.key_page.after.as_deref());
+
         if child_entries.is_empty() {
             ui.label("No child key records were captured.");
         } else {
+            let mut navigated = false;
             for (key_str, snap) in &child_entries {
-                let name = last_component(key_str);
-                let preview = preview_text(name);
+                let preview = if at_roots {
+                    let (hive, path) = root_identity(key_str);
+
+                    format!("{hive}\\{}", preview_text(path))
+                } else {
+                    preview_text(last_component(key_str))
+                };
                 ui.push_id(key_str.as_str(), |ui| {
-                    if ui.button(format!("{}  (values: {}, subkeys: {}, errors: {})", preview, snap.values.len(), snap.subkeys.len(), snap.read_errors.len())).clicked() {
-                        self.enter_key(key_str);
+                    if ui
+                        .button(format!(
+                            "{}  (values: {}, subkeys: {}, errors: {})",
+                            preview,
+                            snap.values.len(),
+                            snap.subkeys.len(),
+                            snap.read_errors.len()
+                        ))
+                        .clicked()
+                    {
+                        navigated = true;
                     }
                 });
+                if navigated {
+                    self.enter_key(key_str);
+                    ui.ctx().request_repaint();
+                    return;
+                }
             }
         }
 
@@ -376,18 +386,29 @@ ui.push_id("registry_key_pagination", |ui| {
             ui.label("No value records at domain roots.");
         }
 
-        ui.horizontal(|ui| {
-            let on_first = self.value_page.after.is_none() && self.value_page.history.is_empty();
-            if ui.add_enabled(!on_first, egui::Button::new("Previous")).clicked() {
-                self.value_page.previous();
-            }
-            ui.label(format!("Page {}", self.value_page.page_number()));
-            if ui.add_enabled(val_has_next, egui::Button::new("Next")).clicked() {
-                if let Some(last) = val_entries.last() {
-                    self.value_page.next(last.0.as_str());
+        ui.push_id("registry_value_pagination", |ui| {
+            ui.horizontal(|ui| {
+                let on_first =
+                    self.value_page.after.is_none() && self.value_page.history.is_empty();
+                if ui
+                    .add_enabled(!on_first, egui::Button::new("Previous"))
+                    .clicked()
+                {
+                    self.value_page.previous();
                 }
-            }
+                ui.label(format!("Page {}", self.value_page.page_number()));
+                if ui
+                    .add_enabled(val_has_next, egui::Button::new("Next"))
+                    .clicked()
+                {
+                    if let Some(last) = val_entries.last() {
+                        self.value_page.next(last.0.as_str());
+                    }
+                }
+            });
         });
+
+        let (val_entries, _) = page_entries(value_source, self.value_page.after.as_deref());
 
         if !val_entries.is_empty() {
             egui::Grid::new("registry_values")
@@ -427,11 +448,17 @@ mod tests {
     fn registry_domains_remain_separate() {
         let mut snap = InspectionSnapshot::default();
         let mut k = KeySnapshot::default();
-        k.values.insert("v".into(), ValueReadResult::Failure(ReadError::ValueNotFound { name: "v".into() }));
+        k.values.insert(
+            "v".into(),
+            ValueReadResult::Failure(ReadError::ValueNotFound { name: "v".into() }),
+        );
         snap.bags.insert("bagroot".into(), k);
-        snap.streams.insert("streamroot".into(), KeySnapshot::default());
-        snap.clsid.insert("clsidroot".into(), KeySnapshot::default());
-        snap.policies.insert("HKLM\\pol".into(), KeySnapshot::default());
+        snap.streams
+            .insert("streamroot".into(), KeySnapshot::default());
+        snap.clsid
+            .insert("clsidroot".into(), KeySnapshot::default());
+        snap.policies
+            .insert("HKLM\\pol".into(), KeySnapshot::default());
 
         assert!(snap.bags.contains_key("bagroot"));
         assert!(!snap.streams.contains_key("bagroot"));
@@ -440,7 +467,10 @@ mod tests {
         assert_eq!(RegistryDomain::Clsid.roots(&snap).len(), 1);
         assert_eq!(RegistryDomain::Policies.roots(&snap).len(), 1);
         assert_eq!(root_identity("HKLM\\pol"), ("HKLM", "pol"));
-        assert_eq!(root_identity("Software\\Policies"), ("HKCU", "Software\\Policies"));
+        assert_eq!(
+            root_identity("Software\\Policies"),
+            ("HKCU", "Software\\Policies")
+        );
     }
 
     #[test]
@@ -448,16 +478,19 @@ mod tests {
         let mut snap = InspectionSnapshot::default();
         let mut hklm = KeySnapshot::default();
         let mut child = KeySnapshot::default();
-        child.values.insert("x".into(), ValueReadResult::Success(RawRegistryValue {
-            key_path: "HKLM\\p".into(),
-            value_name: "x".into(),
-            root: winview_core::RootKey::Hklm,
-            raw_type_id: 4,
-            raw_bytes: vec![1,0,0,0],
-            decoded: None,
-            decoding_status: DecodingStatus::Decoded,
-            source: winview_core::model::ObservationSource::HklmPolicies,
-        }));
+        child.values.insert(
+            "x".into(),
+            ValueReadResult::Success(RawRegistryValue {
+                key_path: "HKLM\\p".into(),
+                value_name: "x".into(),
+                root: winview_core::RootKey::Hklm,
+                raw_type_id: 4,
+                raw_bytes: vec![1, 0, 0, 0],
+                decoded: None,
+                decoding_status: DecodingStatus::Decoded,
+                source: winview_core::model::ObservationSource::HklmPolicies,
+            }),
+        );
         hklm.subkeys.insert("HKLM\\p\\child".into(), child);
         snap.policies.insert("HKLM\\p".into(), hklm);
 
@@ -466,7 +499,11 @@ mod tests {
 
         let roots = RegistryDomain::Policies.roots(&snap);
         let _ = resolve_key(roots, &["HKLM\\p".to_string()]).unwrap();
-        let nested = resolve_key(roots, &["HKLM\\p".to_string(), "HKLM\\p\\child".to_string()]).unwrap();
+        let nested = resolve_key(
+            roots,
+            &["HKLM\\p".to_string(), "HKLM\\p\\child".to_string()],
+        )
+        .unwrap();
         assert!(nested.values.contains_key("x"));
         let resolved_hkcu = resolve_key(roots, &["p".to_string()]);
         assert!(resolved_hkcu.is_some());
@@ -485,7 +522,15 @@ mod tests {
         let roots = RegistryDomain::Bags.roots(&snap);
         assert!(resolve_key(roots, &["root".to_string()]).is_some());
         assert!(resolve_key(roots, &["root".to_string(), "root/child".to_string()]).is_some());
-        assert!(resolve_key(roots, &["root".to_string(), "root/child".to_string(), "root/child/grand".to_string()]).is_some());
+        assert!(resolve_key(
+            roots,
+            &[
+                "root".to_string(),
+                "root/child".to_string(),
+                "root/child/grand".to_string()
+            ]
+        )
+        .is_some());
         assert!(resolve_key(roots, &["nope".to_string()]).is_none());
         assert!(resolve_key(roots, &["root".to_string(), "missing".to_string()]).is_none());
     }
@@ -511,15 +556,23 @@ mod tests {
             // first page
             let (p1, hn1) = page_entries(&m, None);
             assert!(p1.len() <= 25);
-            if n <= 25 { assert!(!hn1); } else { assert!(hn1); }
+            if n <= 25 {
+                assert!(!hn1);
+            } else {
+                assert!(hn1);
+            }
             // last key
             // walk pages
             let mut after: Option<String> = None;
             let mut collected: Vec<String> = Vec::new();
             loop {
                 let (entries, has_next) = page_entries(&m, after.as_deref());
-                for (k, _) in &entries { collected.push((*k).clone()); }
-                if !has_next { break; }
+                for (k, _) in &entries {
+                    collected.push((*k).clone());
+                }
+                if !has_next {
+                    break;
+                }
                 after = entries.last().map(|e| e.0.clone());
             }
             assert_eq!(collected.len(), n);
@@ -533,7 +586,12 @@ mod tests {
         // value map
         let mut vm: BTreeMap<String, ValueReadResult> = BTreeMap::new();
         for i in 0..26 {
-            vm.insert(format!("v{}", i), ValueReadResult::Failure(ReadError::ValueNotFound { name: format!("v{}", i) }));
+            vm.insert(
+                format!("v{}", i),
+                ValueReadResult::Failure(ReadError::ValueNotFound {
+                    name: format!("v{}", i),
+                }),
+            );
         }
         let (ve, vhn) = page_entries(&vm, None);
         assert_eq!(ve.len(), 25);
@@ -584,42 +642,69 @@ mod tests {
 
     #[test]
     fn registry_value_metadata_preserves_read_states() {
-        assert_eq!(observation_status(&ValueReadResult::Success(RawRegistryValue {
-            key_path: "k".into(),
-            value_name: "".into(),
-            root: winview_core::RootKey::Hkcu,
-            raw_type_id: 4,
-            raw_bytes: vec![],
-            decoded: Some(winview_core::model::RegistryValue::Dword(0)),
-            decoding_status: DecodingStatus::Decoded,
-            source: winview_core::model::ObservationSource::HkcuBags,
-        })), "Decoded");
+        assert_eq!(
+            observation_status(&ValueReadResult::Success(RawRegistryValue {
+                key_path: "k".into(),
+                value_name: "".into(),
+                root: winview_core::RootKey::Hkcu,
+                raw_type_id: 4,
+                raw_bytes: vec![],
+                decoded: Some(winview_core::model::RegistryValue::Dword(0)),
+                decoding_status: DecodingStatus::Decoded,
+                source: winview_core::model::ObservationSource::HkcuBags,
+            })),
+            "Decoded"
+        );
 
-        assert_eq!(observation_status(&ValueReadResult::Success(RawRegistryValue {
-            key_path: "k".into(),
-            value_name: "".into(),
-            root: winview_core::RootKey::Hkcu,
-            raw_type_id: 99,
-            raw_bytes: vec![],
-            decoded: None,
-            decoding_status: DecodingStatus::UnknownType,
-            source: winview_core::model::ObservationSource::HkcuBags,
-        })), "Unknown registry type");
+        assert_eq!(
+            observation_status(&ValueReadResult::Success(RawRegistryValue {
+                key_path: "k".into(),
+                value_name: "".into(),
+                root: winview_core::RootKey::Hkcu,
+                raw_type_id: 99,
+                raw_bytes: vec![],
+                decoded: None,
+                decoding_status: DecodingStatus::UnknownType,
+                source: winview_core::model::ObservationSource::HkcuBags,
+            })),
+            "Unknown registry type"
+        );
 
-        assert_eq!(observation_status(&ValueReadResult::Success(RawRegistryValue {
-            key_path: "k".into(),
-            value_name: "".into(),
-            root: winview_core::RootKey::Hkcu,
-            raw_type_id: 4,
-            raw_bytes: vec![1],
-            decoded: None,
-            decoding_status: DecodingStatus::Malformed { reason: "x".into() },
-            source: winview_core::model::ObservationSource::HkcuBags,
-        })), "Malformed data");
+        assert_eq!(
+            observation_status(&ValueReadResult::Success(RawRegistryValue {
+                key_path: "k".into(),
+                value_name: "".into(),
+                root: winview_core::RootKey::Hkcu,
+                raw_type_id: 4,
+                raw_bytes: vec![1],
+                decoded: None,
+                decoding_status: DecodingStatus::Malformed { reason: "x".into() },
+                source: winview_core::model::ObservationSource::HkcuBags,
+            })),
+            "Malformed data"
+        );
 
-        assert_eq!(observation_status(&ValueReadResult::Failure(ReadError::ValueNotFound { name: "v".into() })), "Value not found");
-        assert_eq!(observation_status(&ValueReadResult::Failure(ReadError::KeyNotFound { path: "p".into() })), "Key not found");
-        assert_eq!(observation_status(&ValueReadResult::Failure(ReadError::AccessDenied { path: "p".into() })), "Access denied");
-        assert_eq!(observation_status(&ValueReadResult::Failure(ReadError::Other("e".into()))), "Read failed");
+        assert_eq!(
+            observation_status(&ValueReadResult::Failure(ReadError::ValueNotFound {
+                name: "v".into()
+            })),
+            "Value not found"
+        );
+        assert_eq!(
+            observation_status(&ValueReadResult::Failure(ReadError::KeyNotFound {
+                path: "p".into()
+            })),
+            "Key not found"
+        );
+        assert_eq!(
+            observation_status(&ValueReadResult::Failure(ReadError::AccessDenied {
+                path: "p".into()
+            })),
+            "Access denied"
+        );
+        assert_eq!(
+            observation_status(&ValueReadResult::Failure(ReadError::Other("e".into()))),
+            "Read failed"
+        );
     }
 }

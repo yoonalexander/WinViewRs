@@ -1,8 +1,6 @@
 // winview-app/src/gui/mod.rs
 
 #[cfg(feature = "gui")]
-mod registry_browser;
-#[cfg(feature = "gui")]
 mod advanced;
 #[cfg(feature = "gui")]
 pub mod app;
@@ -14,6 +12,8 @@ pub mod inspection;
 pub mod inspector_tab;
 #[cfg(feature = "gui")]
 pub mod overview;
+#[cfg(feature = "gui")]
+mod registry_browser;
 
 #[cfg(feature = "gui")]
 pub fn run_gui() -> anyhow::Result<()> {
