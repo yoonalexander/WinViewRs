@@ -171,9 +171,9 @@ Current GUI state:
 - Missing and failed observations remain distinct; a setting with no captured observation is reported explicitly and never fabricated or treated as zero.
 - Unexpected registry types can still be inspected in the detail panel without being treated as valid Advanced DWORD settings in the main table.
 - Refresh clears the Advanced selection; switching GUI tabs preserves it.
-- Overview can browse globally recorded inspection errors; Advanced can browse directly recorded Advanced key errors. Both use a reusable paginated panel (25 recorded errors per page) with bounded diagnostic text previews (512 Unicode characters) that preserve the original recorded hive, key path, operation, and error message.
-- Recorded errors remain distinct from failed value observations; identical recorded errors stay separately visible, and zero recorded errors is not treated as proof that a key exists or that all expected values were captured.
-- FolderTypes and Registry domains detailed diagnostics remain deferred.
+- Overview can browse globally recorded inspection errors; FolderTypes can browse the selected hive-level and selected folder-level errors; Advanced can browse directly recorded Advanced key errors; Registry domains can browse the selected key's directly recorded errors. All use a reusable paginated panel (25 recorded errors per page) with bounded diagnostic text previews (512 Unicode characters) that preserve the original recorded hive, key path, operation, and error message.
+- Nested registry keys can be navigated individually to inspect their recorded diagnostics; parent and child diagnostics remain separate.
+- Recorded errors remain distinct from failed value observations; identical recorded errors stay separately visible, and overlapping captured registry roots may contain separately recorded errors that are not deduplicated. Zero recorded errors is not treated as proof that a key exists or that all expected values were captured.
 - No configuration editing is supported.
 
 ### Registry domain browser

@@ -18,11 +18,11 @@ impl ErrorPager {
         count.div_ceil(ERRORS_PER_PAGE).max(1)
     }
 
-    fn select_page(&mut self, page: usize, count: usize) {
+    pub(super) fn select_page(&mut self, page: usize, count: usize) {
         self.page = page.min(Self::page_count(count) - 1);
     }
 
-    fn page_range(&mut self, count: usize) -> std::ops::Range<usize> {
+    pub(super) fn page_range(&mut self, count: usize) -> std::ops::Range<usize> {
         self.select_page(self.page, count);
 
         let start = self.page * ERRORS_PER_PAGE;
@@ -32,8 +32,14 @@ impl ErrorPager {
         start..end
     }
 
+    pub(super) fn reset(&mut self) {
+        self.page = 0;
+    }
+
     pub(super) fn show(&mut self, ui: &mut egui::Ui, heading: &str, errors: &[InspectionError]) {
         ui.push_id(heading, |ui| {
+            self.select_page(self.page, errors.len());
+
             ui.heading(heading);
 
             ui.label(format!("Recorded errors in this scope: {}", errors.len()));
@@ -192,6 +198,42 @@ mod tests {
         pager.select_page(2, 51);
         assert_eq!(pager.page, 2);
         assert_eq!(pager.page_range(10), 0..10);
+        assert_eq!(pager.page, 0);
+
+        // reset() returns the pager to the first page.
+        pager.select_page(2, 51);
+        assert_eq!(pager.page, 2);
+        pager.reset();
+        assert_eq!(pager.page, 0);
+        assert_eq!(pager.page_range(51), 0..25);
+
+        // show() clamps the page immediately against a shrinking slice.
+        let ctx = egui::Context::default();
+        let many: Vec<InspectionError> = (0..51)
+            .map(|i| {
+                error(
+                    RootKey::Hkcu,
+                    "Software\\Test",
+                    "open_key",
+                    &format!("error {i}"),
+                )
+            })
+            .collect();
+        pager.select_page(2, many.len());
+        assert_eq!(pager.page, 2);
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            pager.show(ui, "Global inspection error details", &many[..10]);
+        });
+        output.textures_delta.clear();
+        assert_eq!(pager.page, 0);
+
+        // show() clamps safely against an empty slice.
+        pager.select_page(2, many.len());
+        let empty: [InspectionError; 0] = [];
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            pager.show(ui, "Global inspection error details", &empty);
+        });
+        output.textures_delta.clear();
         assert_eq!(pager.page, 0);
     }
 

@@ -8,6 +8,8 @@ use winview_core::model::{
 
 use winview_core::RootKey;
 
+use super::diagnostics::ErrorPager;
+
 const FOLDERS_PER_PAGE: usize = 25;
 const TEXT_PREVIEW_CHARS: usize = 160;
 
@@ -48,6 +50,8 @@ pub(super) struct FolderBrowser {
     selected_guid: Option<String>,
     view_index: usize,
     selected_value: Option<String>,
+    hive_error_pager: ErrorPager,
+    folder_error_pager: ErrorPager,
 }
 
 impl Default for FolderBrowser {
@@ -58,6 +62,8 @@ impl Default for FolderBrowser {
             selected_guid: None,
             view_index: 0,
             selected_value: None,
+            hive_error_pager: ErrorPager::default(),
+            folder_error_pager: ErrorPager::default(),
         }
     }
 }
@@ -70,6 +76,8 @@ impl FolderBrowser {
             self.selected_guid = None;
             self.view_index = 0;
             self.selected_value = None;
+            self.hive_error_pager.reset();
+            self.folder_error_pager.reset();
         }
     }
 
@@ -97,6 +105,7 @@ impl FolderBrowser {
             self.selected_guid = None;
             self.view_index = 0;
             self.selected_value = None;
+            self.folder_error_pager.reset();
         }
     }
 
@@ -106,6 +115,7 @@ impl FolderBrowser {
 
             self.view_index = 0;
             self.selected_value = None;
+            self.folder_error_pager.reset();
         }
     }
 
@@ -163,6 +173,12 @@ impl FolderBrowser {
         ui.small(
             "These are captured registry records, \
              not necessarily effective Explorer settings.",
+        );
+
+        self.hive_error_pager.show(
+            ui,
+            "FolderTypes hive inspection error details",
+            &folder_types.read_errors,
         );
 
         if keys.is_empty() {
@@ -224,6 +240,16 @@ impl FolderBrowser {
 
             self.show_details(&mut columns[1], snapshot);
         });
+
+        if let Some(folder) = self.selected_folder(snapshot) {
+            self.folder_error_pager.show(
+                ui,
+                "Selected folder inspection error details",
+                &folder.read_errors,
+            );
+        } else {
+            self.folder_error_pager.reset();
+        }
     }
 
     fn show_details(&mut self, ui: &mut egui::Ui, snapshot: &InspectionSnapshot) {
@@ -832,5 +858,147 @@ mod tests {
         let after = serde_json::to_string(&snapshot).unwrap();
 
         assert_eq!(before, after);
+    }
+
+    #[test]
+    fn folder_diagnostics_preserve_scope_and_navigation() {
+        use winview_core::inspection::count_snapshot_read_errors;
+        use winview_core::model::InspectionError;
+
+        fn error(path: &str, message: &str) -> InspectionError {
+            InspectionError {
+                key_path: path.into(),
+                root: RootKey::Hklm,
+                operation: "open_key".into(),
+                error: message.into(),
+            }
+        }
+
+        let mut snapshot = InspectionSnapshot::default();
+
+        // HKLM hive-level errors (enough for multiple diagnostic pages).
+        snapshot.hklm_folder_types.read_errors = (0..30)
+            .map(|i| error("HKLM-hive", &format!("hive error {i}")))
+            .collect();
+
+        // HKCU hive is empty of records but still contains recorded errors.
+        snapshot.hkcu_folder_types.read_errors = (0..3)
+            .map(|i| InspectionError {
+                key_path: "HKCU-hive".into(),
+                root: RootKey::Hkcu,
+                operation: "open_key".into(),
+                error: format!("hkcu hive error {i}"),
+            })
+            .collect();
+
+        // Selected folder with recorded errors and a TopViews record.
+        let folder_a = FolderTypeSnapshot {
+            guid: "GUID-A".into(),
+            canonical_name: Some("Folder A".into()),
+            top_views: BTreeMap::from([("VIEW-A".into(), ViewSnapshot::default())]),
+            read_errors: (0..30)
+                .map(|i| error("GUID-A", &format!("folder A error {i}")))
+                .collect(),
+        };
+
+        // Second folder with different recorded errors.
+        let folder_b = FolderTypeSnapshot {
+            guid: "GUID-B".into(),
+            canonical_name: Some("Folder B".into()),
+            top_views: BTreeMap::new(),
+            read_errors: (0..2)
+                .map(|i| error("GUID-B", &format!("folder B error {i}")))
+                .collect(),
+        };
+
+        snapshot
+            .hklm_folder_types
+            .types
+            .insert("GUID-A".into(), folder_a);
+        snapshot
+            .hklm_folder_types
+            .types
+            .insert("GUID-B".into(), folder_b);
+
+        let before = count_snapshot_read_errors(&snapshot);
+        let before_json = serde_json::to_string(&snapshot).unwrap();
+
+        let mut browser = FolderBrowser::default();
+
+        // A fresh browser has both pagers on the first page.
+        assert_eq!(browser.hive_error_pager.page_range(30).start, 0);
+        assert_eq!(browser.folder_error_pager.page_range(30).start, 0);
+
+        browser.select_root(RootKey::Hklm);
+        browser.select_folder("GUID-A");
+
+        // Move both pagers to the second page.
+        browser.hive_error_pager.select_page(1, 30);
+        browser.folder_error_pager.select_page(1, 30);
+        assert_eq!(browser.hive_error_pager.page_range(30).start, 25);
+        assert_eq!(browser.folder_error_pager.page_range(30).start, 25);
+
+        // Selecting the same hive preserves both pager states.
+        browser.select_root(RootKey::Hklm);
+        assert_eq!(browser.hive_error_pager.page_range(30).start, 25);
+        assert_eq!(browser.folder_error_pager.page_range(30).start, 25);
+
+        // Selecting the same folder preserves both pager states.
+        browser.select_folder("GUID-A");
+        assert_eq!(browser.hive_error_pager.page_range(30).start, 25);
+        assert_eq!(browser.folder_error_pager.page_range(30).start, 25);
+
+        // Changing the folder resets only the folder pager.
+        browser.select_folder("GUID-B");
+        assert_eq!(browser.hive_error_pager.page_range(30).start, 25);
+        assert_eq!(browser.folder_error_pager.page_range(30).start, 0);
+
+        // Changing the folder page resets only the folder pager.
+        browser.select_folder("GUID-A");
+        browser.folder_error_pager.select_page(1, 30);
+        browser.select_page(1, 30);
+        assert_eq!(browser.hive_error_pager.page_range(30).start, 25);
+        assert_eq!(browser.folder_error_pager.page_range(30).start, 0);
+
+        // Changing the view preserves both pagers.
+        browser.select_folder("GUID-A");
+        browser.hive_error_pager.select_page(1, 30);
+        browser.folder_error_pager.select_page(1, 30);
+        browser.select_view(1);
+        assert_eq!(browser.hive_error_pager.page_range(30).start, 25);
+        assert_eq!(browser.folder_error_pager.page_range(30).start, 25);
+
+        // Changing the hive resets both pagers.
+        browser.select_root(RootKey::Hkcu);
+        assert_eq!(browser.hive_error_pager.page_range(30).start, 0);
+        assert_eq!(browser.folder_error_pager.page_range(30).start, 0);
+
+        // A fresh FolderBrowser resets both pagers.
+        let mut fresh = FolderBrowser::default();
+        assert_eq!(fresh.hive_error_pager.page_range(30).start, 0);
+        assert_eq!(fresh.folder_error_pager.page_range(30).start, 0);
+
+        // Exercise the real renderer with an empty hive that has recorded errors.
+        let ctx = egui::Context::default();
+
+        browser.select_root(RootKey::Hkcu);
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            browser.show(ui, &snapshot, &FolderTypesIndex::from_snapshot(&snapshot));
+        });
+        output.textures_delta.clear();
+
+        // Exercise the renderer with a selected folder that has no TopViews records.
+        browser.select_root(RootKey::Hklm);
+        browser.select_folder("GUID-B");
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            browser.show(ui, &snapshot, &FolderTypesIndex::from_snapshot(&snapshot));
+        });
+        output.textures_delta.clear();
+
+        let after = count_snapshot_read_errors(&snapshot);
+        let after_json = serde_json::to_string(&snapshot).unwrap();
+
+        assert_eq!(before, after);
+        assert_eq!(before_json, after_json);
     }
 }

@@ -7,6 +7,8 @@ use winview_core::model::{
     DecodingStatus, InspectionSnapshot, KeySnapshot, ReadError, ValueReadResult,
 };
 
+use super::diagnostics::ErrorPager;
+
 const PAGE_SIZE: usize = 25;
 const TEXT_PREVIEW_CHARS: usize = 160;
 
@@ -175,6 +177,7 @@ pub(super) struct RegistryBrowser {
     key_page: PageCursor,
     value_page: PageCursor,
     selected_value: Option<String>,
+    error_pager: ErrorPager,
 }
 
 impl RegistryBrowser {
@@ -182,6 +185,7 @@ impl RegistryBrowser {
         self.key_page.reset();
         self.value_page.reset();
         self.selected_value = None;
+        self.error_pager.reset();
     }
 
     fn select_domain(&mut self, domain: RegistryDomain) {
@@ -275,7 +279,7 @@ impl RegistryBrowser {
         ui.label(format!("Current hive: {}", hive));
         ui.label(format!("Registry path: {}", path_display));
 
-        let (child_map, value_map, errors) = if let Some(key) = current_key {
+        let (child_map, value_map, _errors) = if let Some(key) = current_key {
             (&key.subkeys, &key.values, &key.read_errors)
         } else {
             // roots level: treat roots as children? We show root records as child list
@@ -453,10 +457,16 @@ impl RegistryBrowser {
             }
         }
 
-        // errors display
-        if !errors.is_empty() {
+        if let Some(key) = current_key {
             ui.separator();
-            ui.label(format!("Direct key errors: {}", errors.len()));
+
+            self.error_pager.show(
+                ui,
+                "Selected key inspection error details",
+                &key.read_errors,
+            );
+        } else {
+            ui.small("Select a captured registry key to inspect its recorded errors.");
         }
     }
 }
@@ -935,5 +945,163 @@ mod tests {
 
         assert_eq!(before, after);
         assert!(key.read_errors.is_empty());
+    }
+
+    #[test]
+    fn registry_diagnostics_preserve_scope_and_navigation() {
+        use winview_core::inspection::count_snapshot_read_errors;
+        use winview_core::model::InspectionError;
+
+        fn error(root: winview_core::RootKey, path: &str, message: &str) -> InspectionError {
+            InspectionError {
+                key_path: path.into(),
+                root,
+                operation: "open_key".into(),
+                error: message.into(),
+            }
+        }
+
+        let mut snapshot = InspectionSnapshot::default();
+
+        // Root key with enough errors for multiple diagnostic pages.
+        let mut bag_root = KeySnapshot {
+            read_errors: (0..30)
+                .map(|i| {
+                    error(
+                        winview_core::RootKey::Hkcu,
+                        "bagroot",
+                        &format!("root error {i}"),
+                    )
+                })
+                .collect(),
+            ..Default::default()
+        };
+        bag_root.values.insert(
+            "Missing".into(),
+            ValueReadResult::Failure(ReadError::ValueNotFound {
+                name: "Missing".into(),
+            }),
+        );
+
+        // Nested child key with distinct errors, including an identical duplicate.
+        let mut child = KeySnapshot::default();
+        child.read_errors.push(error(
+            winview_core::RootKey::Hkcu,
+            r"bagroot\child",
+            "Access is denied.",
+        ));
+        child.read_errors.push(error(
+            winview_core::RootKey::Hkcu,
+            r"bagroot\child",
+            "Access is denied.",
+        ));
+        bag_root.subkeys.insert(r"bagroot\child".into(), child);
+        snapshot.bags.insert("bagroot".into(), bag_root);
+
+        // Separate HKLM and HKCU policy roots.
+        let mut hklm_policy = KeySnapshot::default();
+        hklm_policy
+            .read_errors
+            .push(error(winview_core::RootKey::Hklm, "HKLM-pol", "denied"));
+        snapshot
+            .policies
+            .insert(r"HKLM\Software\Policies\Test".into(), hklm_policy);
+
+        let mut hkcu_policy = KeySnapshot::default();
+        hkcu_policy
+            .read_errors
+            .push(error(winview_core::RootKey::Hkcu, "HKCU-pol", "denied"));
+        snapshot
+            .policies
+            .insert(r"Software\Policies\Test".into(), hkcu_policy);
+
+        // Another registry domain.
+        let mut stream_root = KeySnapshot::default();
+        stream_root
+            .read_errors
+            .push(error(winview_core::RootKey::Hkcu, "streamroot", "failed"));
+        snapshot.streams.insert("streamroot".into(), stream_root);
+
+        let before = count_snapshot_read_errors(&snapshot);
+        let before_json = serde_json::to_string(&snapshot).unwrap();
+
+        // Exact selected key resolution returns the intended error slice.
+        let bag_roots = RegistryDomain::Bags.roots(&snapshot);
+        let resolved = resolve_key(bag_roots, &["bagroot".to_string()]).unwrap();
+        assert_eq!(resolved.read_errors.len(), 30);
+
+        let child_resolved = resolve_key(
+            bag_roots,
+            &["bagroot".to_string(), r"bagroot\child".to_string()],
+        )
+        .unwrap();
+        // Identical recorded error entries are not deduplicated.
+        assert_eq!(child_resolved.read_errors.len(), 2);
+        assert_eq!(
+            child_resolved.read_errors[0].key_path,
+            child_resolved.read_errors[1].key_path
+        );
+        assert_eq!(
+            child_resolved.read_errors[0].error,
+            child_resolved.read_errors[1].error
+        );
+
+        // Parent and child diagnostics remain separate.
+        assert_ne!(resolved.read_errors.len(), child_resolved.read_errors.len());
+
+        // HKCU and HKLM diagnostics remain separate.
+        let policy_roots = RegistryDomain::Policies.roots(&snapshot);
+        let hklm =
+            resolve_key(policy_roots, &[r"HKLM\Software\Policies\Test".to_string()]).unwrap();
+        let hkcu = resolve_key(policy_roots, &[r"Software\Policies\Test".to_string()]).unwrap();
+        assert_eq!(hklm.read_errors[0].root, winview_core::RootKey::Hklm);
+        assert_eq!(hkcu.read_errors[0].root, winview_core::RootKey::Hkcu);
+
+        let mut browser = RegistryBrowser::default();
+
+        // Entering a key resets diagnostic pagination.
+        browser.error_pager.select_page(1, 30);
+        assert_eq!(browser.error_pager.page_range(30).start, 25);
+        browser.enter_key("bagroot");
+        assert_eq!(browser.error_pager.page_range(30).start, 0);
+
+        // Up resets diagnostic pagination.
+        browser.error_pager.select_page(1, 30);
+        browser.go_up();
+        assert_eq!(browser.error_pager.page_range(30).start, 0);
+
+        // Roots resets diagnostic pagination.
+        browser.error_pager.select_page(1, 30);
+        browser.go_to_roots();
+        assert_eq!(browser.error_pager.page_range(30).start, 0);
+
+        // Changing domains resets diagnostic pagination.
+        browser.error_pager.select_page(1, 30);
+        browser.select_domain(RegistryDomain::Streams);
+        assert_eq!(browser.error_pager.page_range(30).start, 0);
+
+        // Selecting the same domain preserves diagnostic pagination.
+        browser.error_pager.select_page(1, 30);
+        browser.select_domain(RegistryDomain::Streams);
+        assert_eq!(browser.error_pager.page_range(30).start, 25);
+
+        // Changing only value selection preserves diagnostic pagination.
+        browser.selected_value = Some("Missing".into());
+        assert_eq!(browser.error_pager.page_range(30).start, 25);
+
+        // Exercise the real renderer.
+        let ctx = egui::Context::default();
+        browser.select_domain(RegistryDomain::Bags);
+        browser.enter_key("bagroot");
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            browser.show(ui, &snapshot);
+        });
+        output.textures_delta.clear();
+
+        let after = count_snapshot_read_errors(&snapshot);
+        let after_json = serde_json::to_string(&snapshot).unwrap();
+
+        assert_eq!(before, after);
+        assert_eq!(before_json, after_json);
     }
 }
