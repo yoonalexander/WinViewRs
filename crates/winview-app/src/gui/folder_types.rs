@@ -47,6 +47,7 @@ pub(super) struct FolderBrowser {
     page: usize,
     selected_guid: Option<String>,
     view_index: usize,
+    selected_value: Option<String>,
 }
 
 impl Default for FolderBrowser {
@@ -56,6 +57,7 @@ impl Default for FolderBrowser {
             page: 0,
             selected_guid: None,
             view_index: 0,
+            selected_value: None,
         }
     }
 }
@@ -67,6 +69,7 @@ impl FolderBrowser {
             self.page = 0;
             self.selected_guid = None;
             self.view_index = 0;
+            self.selected_value = None;
         }
     }
 
@@ -93,6 +96,7 @@ impl FolderBrowser {
             self.page = next;
             self.selected_guid = None;
             self.view_index = 0;
+            self.selected_value = None;
         }
     }
 
@@ -101,6 +105,14 @@ impl FolderBrowser {
             self.selected_guid = Some(guid.to_string());
 
             self.view_index = 0;
+            self.selected_value = None;
+        }
+    }
+
+    fn select_view(&mut self, index: usize) {
+        if self.view_index != index {
+            self.view_index = index;
+            self.selected_value = None;
         }
     }
 
@@ -216,6 +228,8 @@ impl FolderBrowser {
 
     fn show_details(&mut self, ui: &mut egui::Ui, snapshot: &InspectionSnapshot) {
         let Some(folder) = self.selected_folder(snapshot) else {
+            self.selected_value = None;
+
             ui.label("Select a folder type to inspect its captured settings.");
 
             return;
@@ -233,6 +247,8 @@ impl FolderBrowser {
         ui.separator();
 
         if folder.top_views.is_empty() {
+            self.selected_value = None;
+
             ui.label("No TopViews records were captured.");
 
             return;
@@ -240,7 +256,7 @@ impl FolderBrowser {
 
         let count = folder.top_views.len();
 
-        self.view_index = self.view_index.min(count - 1);
+        self.select_view(self.view_index.min(count - 1));
 
         if count > 1 {
             ui.horizontal(|ui| {
@@ -248,21 +264,23 @@ impl FolderBrowser {
                     .add_enabled(self.view_index > 0, egui::Button::new("Previous view"))
                     .clicked()
                 {
-                    self.view_index = self.view_index.saturating_sub(1);
+                    self.select_view(self.view_index.saturating_sub(1));
                 }
-
-                ui.label(format!("View {} of {}", self.view_index + 1, count,));
 
                 if ui
                     .add_enabled(self.view_index + 1 < count, egui::Button::new("Next view"))
                     .clicked()
                 {
-                    self.view_index += 1;
+                    self.select_view(self.view_index + 1);
                 }
+
+                ui.label(format!("View {} of {}", self.view_index + 1, count,));
             });
         }
 
         let Some((guid, view)) = folder.top_views.iter().nth(self.view_index) else {
+            self.selected_value = None;
+
             return;
         };
 
@@ -273,7 +291,12 @@ impl FolderBrowser {
             .striped(true)
             .show(ui, |ui| {
                 for (label, value) in view_rows(view) {
-                    ui.label(label);
+                    let selected = self.selected_value.as_deref() == Some(label);
+
+                    if ui.selectable_label(selected, label).clicked() {
+                        self.selected_value = Some(label.to_string());
+                    }
+
                     ui.label(value);
                     ui.end_row();
                 }
@@ -283,6 +306,20 @@ impl FolderBrowser {
             "Unavailable fields may be missing, \
              unreadable, omitted, or undecodable.",
         );
+
+        if let Some(name) = self.selected_value.as_deref() {
+            match view.raw_values.get(name) {
+                Some(observation) => {
+                    super::value_details::show_value_details(ui, name, observation);
+                }
+                None => {
+                    ui.separator();
+                    ui.heading("Value details");
+                    ui.label(name);
+                    ui.label("No raw observation was captured for this field.");
+                }
+            }
+        }
     }
 }
 
@@ -597,5 +634,203 @@ mod tests {
         assert_eq!(text_or_unavailable(None), "Unavailable");
         assert_eq!(text_or_unavailable(Some("")), "(empty string)");
         assert_eq!(text_or_unavailable(Some("test")), "test");
+    }
+
+    #[test]
+    fn folder_raw_selection_resets_on_navigation() {
+        use winview_core::model::FolderTypeSnapshot;
+
+        let mut snapshot = snapshot_with_folder_types();
+
+        for i in 3..30 {
+            let guid = format!("GUID-{}", i);
+            let folder = FolderTypeSnapshot {
+                guid: guid.clone(),
+                canonical_name: Some(format!("Folder {}", i)),
+                top_views: BTreeMap::new(),
+                read_errors: vec![],
+            };
+            snapshot.hklm_folder_types.types.insert(guid, folder);
+        }
+
+        let index = FolderTypesIndex::from_snapshot(&snapshot);
+
+        let mut browser = FolderBrowser::default();
+
+        assert_eq!(browser.selected_value, None);
+
+        // Selecting the same hive preserves selection.
+        browser.selected_value = Some("Mode".into());
+        browser.select_root(RootKey::Hklm);
+        assert_eq!(browser.selected_value.as_deref(), Some("Mode"));
+
+        // Selecting the same folder preserves selection.
+        browser.select_folder("GUID-A");
+        browser.selected_value = Some("Mode".into());
+        browser.select_folder("GUID-A");
+        assert_eq!(browser.selected_value.as_deref(), Some("Mode"));
+
+        // Selecting the same folder page preserves selection.
+        browser.selected_value = Some("Mode".into());
+        browser.select_page(browser.page, index.hklm.len());
+        assert_eq!(browser.selected_value.as_deref(), Some("Mode"));
+
+        // Selecting the same view preserves selection.
+        browser.selected_value = Some("Mode".into());
+        browser.select_view(browser.view_index);
+        assert_eq!(browser.selected_value.as_deref(), Some("Mode"));
+
+        // Changing hive clears selection.
+        browser.selected_value = Some("Mode".into());
+        browser.select_root(RootKey::Hkcu);
+        assert_eq!(browser.selected_value, None);
+
+        // Changing folder page clears selection.
+        browser.select_root(RootKey::Hklm);
+        browser.selected_value = Some("Mode".into());
+        browser.select_page(1, index.hklm.len());
+        assert_eq!(browser.selected_value, None);
+
+        // Changing folder clears selection.
+        browser.selected_value = Some("Mode".into());
+        browser.select_folder("GUID-C");
+        assert_eq!(browser.selected_value, None);
+
+        // Changing view clears selection.
+        browser.selected_value = Some("Mode".into());
+        browser.select_view(browser.view_index + 1);
+        assert_eq!(browser.selected_value, None);
+
+        // A new default FolderBrowser clears selection.
+        let fresh = FolderBrowser::default();
+        assert_eq!(fresh.selected_value, None);
+    }
+
+    #[test]
+    fn folder_raw_details_preserve_captured_observations() {
+        use winview_core::model::{
+            DecodingStatus, ObservationSource, RawRegistryValue, ReadError, RegistryValue,
+            ValueReadResult,
+        };
+
+        fn success(
+            name: &str,
+            type_id: u32,
+            bytes: Vec<u8>,
+            decoded: Option<RegistryValue>,
+            status: DecodingStatus,
+        ) -> ValueReadResult {
+            ValueReadResult::Success(RawRegistryValue {
+                key_path: r"Software\Test".into(),
+                value_name: name.into(),
+                root: RootKey::Hkcu,
+                raw_type_id: type_id,
+                raw_bytes: bytes,
+                decoded,
+                decoding_status: status,
+                source: ObservationSource::HkcuFolderTypes,
+            })
+        }
+
+        let mut raw_values = BTreeMap::new();
+        raw_values.insert(
+            "Mode".into(),
+            success(
+                "Mode",
+                4,
+                4u32.to_le_bytes().to_vec(),
+                Some(RegistryValue::Dword(4)),
+                DecodingStatus::Decoded,
+            ),
+        );
+        raw_values.insert(
+            "ColInfo".into(),
+            success(
+                "ColInfo",
+                3,
+                vec![1],
+                None,
+                DecodingStatus::Malformed {
+                    reason: "Invalid binary length".into(),
+                },
+            ),
+        );
+        raw_values.insert(
+            "FFlags".into(),
+            ValueReadResult::Failure(ReadError::ValueNotFound {
+                name: "FFlags".into(),
+            }),
+        );
+
+        let view = ViewSnapshot {
+            logical_view_mode: Some(0),
+            mode: Some(4),
+            icon_size: Some(16),
+            group_by: None,
+            group_ascending: Some(0),
+            sort_by_list: None,
+            column_list: None,
+            col_info: Some(vec![1]),
+            f_flags: Some(0),
+            raw_values,
+        };
+
+        let folder = FolderTypeSnapshot {
+            guid: "GUID-A".into(),
+            canonical_name: Some("User Documents".into()),
+            top_views: BTreeMap::from([("VIEW-A".into(), view)]),
+            read_errors: vec![],
+        };
+
+        let mut snapshot = InspectionSnapshot::default();
+        snapshot
+            .hkcu_folder_types
+            .types
+            .insert("GUID-A".into(), folder);
+
+        let before = serde_json::to_string(&snapshot).unwrap();
+
+        let mut browser = FolderBrowser::default();
+        browser.select_root(RootKey::Hkcu);
+        browser.select_folder("GUID-A");
+
+        let ctx = egui::Context::default();
+
+        // Captured DWORD observation resolves through the raw_values map.
+        browser.selected_value = Some("Mode".into());
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            browser.show_details(ui, &snapshot);
+        });
+        output.textures_delta.clear();
+        assert_eq!(browser.selected_value.as_deref(), Some("Mode"));
+
+        // Malformed captured observation still resolves.
+        browser.selected_value = Some("ColInfo".into());
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            browser.show_details(ui, &snapshot);
+        });
+        output.textures_delta.clear();
+        assert_eq!(browser.selected_value.as_deref(), Some("ColInfo"));
+
+        // Failed read resolves to the captured failure.
+        browser.selected_value = Some("FFlags".into());
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            browser.show_details(ui, &snapshot);
+        });
+        output.textures_delta.clear();
+        assert_eq!(browser.selected_value.as_deref(), Some("FFlags"));
+
+        // A normalized field without a raw observation keeps the selection
+        // but does not fabricate an observation.
+        browser.selected_value = Some("IconSize".into());
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            browser.show_details(ui, &snapshot);
+        });
+        output.textures_delta.clear();
+        assert_eq!(browser.selected_value.as_deref(), Some("IconSize"));
+
+        let after = serde_json::to_string(&snapshot).unwrap();
+
+        assert_eq!(before, after);
     }
 }

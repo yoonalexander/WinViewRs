@@ -160,6 +160,10 @@ Current GUI state:
 - Paginated folder-type browsing (25 records per page).
 - Canonical names and GUIDs displayed for each folder type.
 - Captured TopViews settings shown per view (LogicalViewMode, Mode, IconSize, GroupBy, etc.).
+- Select a TopViews field to inspect its captured raw observation in a shared read-only detail panel, showing the value name, registry hive, captured key path, observation source, original numeric registry type ID, raw payload size, decoding status, a bounded hexadecimal raw payload preview, and a bounded decoded representation.
+- Previews are bounded (64 bytes of hexadecimal, 160 characters of text, 8 multi-string entries) with explicit truncation indicators; the raw preview is **not** a complete raw payload dump.
+- Fields without a corresponding captured raw observation are explicitly reported as having no raw observation, which is distinct from a failed read or a zero-length payload.
+- The existing normalized field display is unchanged; selection only adds the raw detail panel below it.
 - Explicit distinction between unavailable values and captured values (including empty strings).
 - These records are captured registry snapshots, not necessarily the effective settings Explorer applies.
 - Advanced settings browser with seven supported settings (HideFileExt, UseCompactMode, AutoCheckSelect, Hidden, LaunchTo, FullRowSelect, NoStrCmpLogical), numeric DWORD values, distinct read and decoding statuses, and read-only behavior.

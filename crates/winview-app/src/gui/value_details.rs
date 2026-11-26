@@ -138,12 +138,12 @@ fn source_label(source: ObservationSource) -> &'static str {
     }
 }
 
-fn read_error_label(error: &ReadError) -> (&'static str, String) {
+fn read_error_label(error: &ReadError) -> (&'static str, &str) {
     match error {
-        ReadError::KeyNotFound { path } => ("Key not found", path.clone()),
-        ReadError::ValueNotFound { name } => ("Value not found", name.clone()),
-        ReadError::AccessDenied { path } => ("Access denied", path.clone()),
-        ReadError::Other(message) => ("Read failed", message.clone()),
+        ReadError::KeyNotFound { path } => ("Key not found", path.as_str()),
+        ReadError::ValueNotFound { name } => ("Value not found", name.as_str()),
+        ReadError::AccessDenied { path } => ("Access denied", path.as_str()),
+        ReadError::Other(message) => ("Read failed", message.as_str()),
     }
 }
 
@@ -206,7 +206,7 @@ fn detail_rows(name: &str, observation: &ValueReadResult) -> Vec<DetailRow> {
             let (status, detail) = read_error_label(error);
 
             rows.push(DetailRow::new("Read status", status));
-            rows.push(DetailRow::new("Error details", text_preview(&detail)));
+            rows.push(DetailRow::new("Error details", text_preview(detail)));
             rows.push(DetailRow::new("Registry type ID", UNAVAILABLE));
             rows.push(DetailRow::new("Raw payload size", UNAVAILABLE));
             rows.push(DetailRow::new("Decoded representation", UNAVAILABLE));
@@ -412,7 +412,7 @@ mod tests {
         let failed = ValueReadResult::Failure(ReadError::AccessDenied {
             path: r"Software\Test".into(),
         });
-        let failed_rows = detail_rows("Mode", &failed);
+        let failed_rows = detail_rows("Failed", &failed);
         assert_eq!(row_value(&failed_rows, "Read status"), "Access denied");
         assert_eq!(row_value(&failed_rows, "Error details"), r"Software\Test");
         assert_eq!(row_value(&failed_rows, "Registry type ID"), UNAVAILABLE);
@@ -426,7 +426,9 @@ mod tests {
         key.values.insert("Mode".into(), decoded);
         key.values.insert("Unknown".into(), unknown);
         key.values.insert("Malformed".into(), malformed);
-        key.values.insert("Mode".into(), failed);
+        key.values.insert("Failed".into(), failed);
+
+        assert_eq!(key.values.len(), 4);
 
         let before = serde_json::to_string(&key).unwrap();
 
