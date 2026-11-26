@@ -655,44 +655,90 @@ mod tests {
 
     #[test]
     fn registry_navigation_resets_pagination() {
-        let mut b = RegistryBrowser::default();
-        assert_eq!(b.domain, RegistryDomain::Bags);
-        b.key_page.after = Some("x".into());
-        b.value_page.after = Some("y".into());
-        b.path.push("p".into());
+        fn populate_cursors(browser: &mut RegistryBrowser) {
+            browser.key_page.next("key-a");
+            browser.key_page.next("key-b");
+            browser.value_page.next("value-a");
+            browser.value_page.next("value-b");
+        }
 
-        b.select_domain(RegistryDomain::Streams);
-        assert!(b.path.is_empty());
-        assert!(b.key_page.after.is_none());
-        assert!(b.value_page.after.is_none());
+        fn assert_cursors_reset(browser: &RegistryBrowser) {
+            assert!(browser.key_page.after.is_none());
+            assert!(browser.key_page.history.is_empty());
+            assert_eq!(browser.key_page.page_number(), 1);
 
-        // same domain preserves
-        b.path.push("q".into());
-        b.key_page.after = Some("z".into());
-        let after_before = b.key_page.after.clone();
-        b.select_domain(RegistryDomain::Streams);
-        assert_eq!(b.key_page.after, after_before);
+            assert!(browser.value_page.after.is_none());
+            assert!(browser.value_page.history.is_empty());
+            assert_eq!(browser.value_page.page_number(), 1);
+        }
 
-        // enter key resets
-        b.key_page.after = Some("z".into());
-        b.value_page.after = Some("w".into());
-        b.enter_key("k");
-        assert!(b.key_page.after.is_none());
-        assert!(b.value_page.after.is_none());
+        let mut browser = RegistryBrowser::default();
 
-        // up removes one
-        b.go_to_roots();
-        b.path.push("a".into());
-        b.path.push("b".into());
-        b.go_up();
-        assert_eq!(b.path, vec!["a".to_string()]);
+        assert_eq!(browser.domain, RegistryDomain::Bags);
+        assert!(browser.path.is_empty());
+        assert_cursors_reset(&browser);
 
-        b.go_to_roots();
-        assert!(b.path.is_empty());
+        // Selecting the same domain preserves all state.
+        browser.path.push("root".into());
+        populate_cursors(&mut browser);
 
-        // up at roots safe
-        b.go_up();
-        assert!(b.path.is_empty());
+        let original_path = browser.path.clone();
+        let key_after = browser.key_page.after.clone();
+        let key_history = browser.key_page.history.clone();
+        let value_after = browser.value_page.after.clone();
+        let value_history = browser.value_page.history.clone();
+
+        browser.select_domain(RegistryDomain::Bags);
+
+        assert_eq!(browser.path, original_path);
+        assert_eq!(browser.key_page.after, key_after);
+        assert_eq!(browser.key_page.history, key_history);
+        assert_eq!(browser.value_page.after, value_after);
+        assert_eq!(browser.value_page.history, value_history);
+
+        // Switching domains clears all navigation state.
+        browser.select_domain(RegistryDomain::Streams);
+
+        assert_eq!(browser.domain, RegistryDomain::Streams);
+        assert!(browser.path.is_empty());
+        assert_cursors_reset(&browser);
+
+        // Entering a key resets both cursors.
+        populate_cursors(&mut browser);
+        browser.enter_key("root");
+
+        assert_eq!(browser.path, vec!["root".to_string()]);
+        assert_cursors_reset(&browser);
+
+        // Entering a child also resets both cursors.
+        populate_cursors(&mut browser);
+        browser.enter_key(r"root\child");
+
+        assert_eq!(
+            browser.path,
+            vec!["root".to_string(), r"root\child".to_string(),],
+        );
+        assert_cursors_reset(&browser);
+
+        // Up removes exactly one path element.
+        populate_cursors(&mut browser);
+        browser.go_up();
+
+        assert_eq!(browser.path, vec!["root".to_string()]);
+        assert_cursors_reset(&browser);
+
+        // Roots clears the entire path.
+        populate_cursors(&mut browser);
+        browser.go_to_roots();
+
+        assert!(browser.path.is_empty());
+        assert_cursors_reset(&browser);
+
+        // Up at roots remains safe.
+        browser.go_up();
+
+        assert!(browser.path.is_empty());
+        assert_cursors_reset(&browser);
     }
 
     #[test]
