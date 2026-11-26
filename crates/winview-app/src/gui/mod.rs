@@ -5,6 +5,8 @@ mod advanced;
 #[cfg(feature = "gui")]
 pub mod app;
 #[cfg(feature = "gui")]
+mod diagnostics;
+#[cfg(feature = "gui")]
 pub mod folder_types;
 #[cfg(feature = "gui")]
 pub mod inspection;

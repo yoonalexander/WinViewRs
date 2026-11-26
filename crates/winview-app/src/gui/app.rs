@@ -9,6 +9,7 @@ use winview_core::RegistryReader;
 use super::inspection::InspectionState;
 
 use super::advanced::AdvancedBrowser;
+use super::diagnostics::ErrorPager;
 use super::folder_types::FolderBrowser;
 use super::overview::show_overview;
 use super::registry_browser::RegistryBrowser;
@@ -29,6 +30,7 @@ pub struct WinViewApp {
     folder_browser: FolderBrowser,
     registry_browser: RegistryBrowser,
     advanced_browser: AdvancedBrowser,
+    global_error_pager: ErrorPager,
 }
 
 impl eframe::App for WinViewApp {
@@ -70,6 +72,8 @@ impl eframe::App for WinViewApp {
                 self.registry_browser = RegistryBrowser::default();
 
                 self.advanced_browser = AdvancedBrowser::default();
+
+                self.global_error_pager = ErrorPager::default();
 
                 self.page = InspectorPage::Overview;
             }
@@ -139,6 +143,12 @@ impl eframe::App for WinViewApp {
                                 .id_salt("inspection_overview_scroll")
                                 .show(ui, |ui| {
                                     show_overview(ui, &result.overview);
+
+                                    self.global_error_pager.show(
+                                        ui,
+                                        "Global inspection error details",
+                                        &result.snapshot.errors,
+                                    );
                                 });
                         }
 

@@ -71,6 +71,7 @@ fn advanced_rows(advanced: &KeySnapshot) -> [AdvancedRow; 7] {
 #[derive(Default)]
 pub(super) struct AdvancedBrowser {
     selected_value: Option<&'static str>,
+    error_pager: super::diagnostics::ErrorPager,
 }
 
 impl AdvancedBrowser {
@@ -153,6 +154,12 @@ impl AdvancedBrowser {
                 }
             }
         }
+
+        self.error_pager.show(
+            ui,
+            "Advanced key inspection error details",
+            &advanced.read_errors,
+        );
     }
 }
 
@@ -506,7 +513,7 @@ mod tests {
                 value_name: USE_COMPACT_MODE.into(),
                 root: RootKey::Hkcu,
                 raw_type_id: 1,
-                raw_bytes: vec![0x41],
+                raw_bytes: vec![0x78, 0x00, 0x00, 0x00],
                 decoded: Some(RegistryValue::String("x".into())),
                 decoding_status: DecodingStatus::Decoded,
                 source: ObservationSource::HkcuAdvanced,
