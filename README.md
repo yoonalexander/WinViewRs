@@ -165,18 +165,22 @@ Current GUI state:
 - Advanced settings browser with seven supported settings (HideFileExt, UseCompactMode, AutoCheckSelect, Hidden, LaunchTo, FullRowSelect, NoStrCmpLogical), numeric DWORD values, distinct read and decoding statuses, and read-only behavior.
 - No configuration editing is supported.
 
-## Known limitations
-
-See `docs/PHASE_0_COMPLETION.md` for the complete list of known limitations and their classification.
-
 ### Registry domain browser
 
 - Reusable read-only browser for Bags, Streams, CLSID, and Policies domains.
 - Hierarchical key navigation with Roots and Up controls.
 - Bounded key and value pagination (25 records per page).
 - Registry type IDs, payload sizes, and read/decoding statuses.
-- Raw payload inspection and detailed diagnostics remain future work.
-- All displayed information comes from captured read-only snapshots.
+- Select a captured value to inspect its details: value name (including `(Default)`), registry hive, captured key path, observation source, original numeric registry type ID, total raw payload size, decoding status, a bounded hexadecimal raw payload preview, and a bounded decoded representation.
+- Previews are bounded (64 bytes of hexadecimal, 160 characters of text, 8 multi-string entries) with explicit truncation indicators; the raw preview is **not** a complete raw payload dump.
+- Decoded data is shown only when decoding succeeded; malformed, unknown-type, and failed reads are reported honestly without fabricating bytes.
+- Changing domains, entering keys, going Up, returning to Roots, changing the value page, or refreshing clears the current selection.
+- All displayed information comes from captured read-only snapshots; no additional registry reads are performed.
+- Detailed recorded inspection errors remain deferred.
+
+## Known limitations
+
+See `docs/PHASE_0_COMPLETION.md` for the complete list of known limitations and their classification.
 
 ## Roadmap
 

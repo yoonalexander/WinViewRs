@@ -14,6 +14,8 @@ pub mod inspector_tab;
 pub mod overview;
 #[cfg(feature = "gui")]
 mod registry_browser;
+#[cfg(feature = "gui")]
+mod value_details;
 
 #[cfg(feature = "gui")]
 pub fn run_gui() -> anyhow::Result<()> {

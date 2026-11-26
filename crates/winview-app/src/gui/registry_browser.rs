@@ -174,12 +174,14 @@ pub(super) struct RegistryBrowser {
     path: Vec<String>,
     key_page: PageCursor,
     value_page: PageCursor,
+    selected_value: Option<String>,
 }
 
 impl RegistryBrowser {
     fn reset_pages(&mut self) {
         self.key_page.reset();
         self.value_page.reset();
+        self.selected_value = None;
     }
 
     fn select_domain(&mut self, domain: RegistryDomain) {
@@ -397,6 +399,7 @@ impl RegistryBrowser {
                     .clicked()
                 {
                     self.value_page.previous();
+                    self.selected_value = None;
                     ui.ctx().request_repaint();
                 }
                 if ui
@@ -406,6 +409,7 @@ impl RegistryBrowser {
                     if let Some(last) = val_entries.last() {
                         self.value_page.next(last.0.as_str());
                     }
+                    self.selected_value = None;
                     ui.ctx().request_repaint();
                 }
                 ui.label(format!("Page {}", self.value_page.page_number()));
@@ -426,13 +430,27 @@ impl RegistryBrowser {
                     ui.end_row();
                     for (name, obs) in &val_entries {
                         let meta = value_metadata(name, obs);
-                        ui.label(meta.name);
+                        let selected = self.selected_value.as_deref() == Some(name.as_str());
+                        if ui.selectable_label(selected, meta.name).clicked() {
+                            self.selected_value = Some(name.to_string());
+                        }
                         ui.label(meta.type_id);
                         ui.label(meta.payload_size);
                         ui.label(meta.status);
                         ui.end_row();
                     }
                 });
+        }
+
+        if let Some(selected) = self.selected_value.clone() {
+            match value_source.get(&selected) {
+                Some(observation) => {
+                    super::value_details::show_value_details(ui, &selected, observation);
+                }
+                None => {
+                    self.selected_value = None;
+                }
+            }
         }
 
         // errors display
